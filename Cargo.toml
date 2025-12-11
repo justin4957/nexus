@@ -1,0 +1,58 @@
+[package]
+name = "nexus"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <you@example.com>"]
+description = "A channel-based pub/sub terminal manager with a unified prompt interface"
+license = "MIT"
+repository = "https://github.com/yourusername/nexus"
+keywords = ["terminal", "multiplexer", "cli", "pubsub", "channels"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Terminal handling
+crossterm = "0.27"
+
+# PTY management
+portable-pty = "0.8"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+rmp-serde = "1.1"  # MessagePack
+
+# CLI argument parsing
+clap = { version = "4.4", features = ["derive"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+
+[dev-dependencies]
+proptest = "1.4"
+tempfile = "3.9"
+
+[[bin]]
+name = "nexus"
+path = "src/main.rs"
+
+[[bin]]
+name = "nexus-server"
+path = "src/bin/server.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
