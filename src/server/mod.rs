@@ -1,6 +1,6 @@
 //! Server module - Unix socket listener and client connection handling
 
-mod connection;
+pub mod connection;
 mod listener;
 mod session;
 
