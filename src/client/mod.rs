@@ -6,7 +6,7 @@ mod renderer;
 use crate::client::input::{parse_input, ParsedInput};
 use crate::client::renderer::{ChannelStatusInfo, Renderer};
 use crate::config::Config;
-use crate::protocol::{ClientMessage, ServerMessage, ChannelEvent};
+use crate::protocol::{ChannelEvent, ClientMessage, ServerMessage};
 use crate::server::connection::{read_message, write_message};
 use anyhow::{anyhow, Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -40,7 +40,7 @@ pub async fn start_new_session(name: &str) -> Result<()> {
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .join("nexus-server");
-            
+
             let server_bin = if exe.exists() {
                 exe.to_string_lossy().to_string()
             } else {
@@ -83,7 +83,8 @@ pub async fn attach_session(name: &str) -> Result<()> {
         return Err(anyhow!("Session '{}' not found", name));
     }
 
-    let stream = UnixStream::connect(&socket_path).await
+    let stream = UnixStream::connect(&socket_path)
+        .await
         .context("Failed to connect to session")?;
 
     run_client_loop(stream).await
@@ -120,7 +121,7 @@ pub async fn list_sessions() -> Result<()> {
 /// Kill a session
 pub async fn kill_session(name: &str) -> Result<()> {
     tracing::info!("Killing session: {}", name);
-    
+
     // Connect and send shutdown
     // We reuse logic but send a Shutdown message immediately
     let config = Config::load()?;
@@ -131,15 +132,17 @@ pub async fn kill_session(name: &str) -> Result<()> {
     }
 
     let mut stream = UnixStream::connect(&socket_path).await?;
-    
+
     // Handshake
-    let hello = ClientMessage::Hello { protocol_version: 1 };
+    let hello = ClientMessage::Hello {
+        protocol_version: 1,
+    };
     write_message(&mut stream, &crate::protocol::serialize(&hello)?).await?;
-    
+
     // Send Shutdown
     let shutdown = ClientMessage::Shutdown;
     write_message(&mut stream, &crate::protocol::serialize(&shutdown)?).await?;
-    
+
     println!("Session '{}' killed.", name);
     Ok(())
 }
@@ -153,30 +156,30 @@ pub async fn attach_or_create(name: &str) -> Result<()> {
 /// Main client loop
 async fn run_client_loop(stream: UnixStream) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
-    
+
     // 1. Handshake
-    let hello = ClientMessage::Hello { protocol_version: 1 };
+    let hello = ClientMessage::Hello {
+        protocol_version: 1,
+    };
     write_message(&mut writer, &crate::protocol::serialize(&hello)?).await?;
-    
+
     // Wait for Welcome (in the read loop, but we expect it first)
     // Actually, we'll just handle it in the loop
-    
+
     // Setup UI
     let renderer = Renderer::new()?;
     Renderer::enter_raw_mode()?;
-    
+
     // Channels for communication
     let (input_tx, mut input_rx) = mpsc::channel(100);
     let (server_tx, mut server_rx) = mpsc::channel(100);
     let (msg_tx, mut msg_rx) = mpsc::channel(100); // Messages to send to server
 
     // Input task (blocking)
-    std::thread::spawn(move || {
-        loop {
-            if let Ok(event) = event::read() {
-                if input_tx.blocking_send(event).is_err() {
-                    break;
-                }
+    std::thread::spawn(move || loop {
+        if let Ok(event) = event::read() {
+            if input_tx.blocking_send(event).is_err() {
+                break;
             }
         }
     });
@@ -185,18 +188,16 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     tokio::spawn(async move {
         loop {
             match read_message(&mut reader).await {
-                Ok(Some(data)) => {
-                    match crate::protocol::deserialize::<ServerMessage>(&data) {
-                        Ok(msg) => {
-                            if server_tx.send(msg).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(_e) => {
-                            tracing::error!("Failed to deserialize: {}", _e);
+                Ok(Some(data)) => match crate::protocol::deserialize::<ServerMessage>(&data) {
+                    Ok(msg) => {
+                        if server_tx.send(msg).await.is_err() {
+                            break;
                         }
                     }
-                }
+                    Err(_e) => {
+                        tracing::error!("Failed to deserialize: {}", _e);
+                    }
+                },
                 Ok(None) => break, // EOF
                 Err(e) => {
                     tracing::error!("Connection error: {}", e);
@@ -218,7 +219,11 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     // Redraw initially
     Renderer::clear(&mut std::io::stdout())?;
     renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
-    renderer.draw_prompt(&mut std::io::stdout(), active_channel.as_deref(), &input_buffer)?;
+    renderer.draw_prompt(
+        &mut std::io::stdout(),
+        active_channel.as_deref(),
+        &input_buffer,
+    )?;
 
     // Main loop
     loop {
@@ -241,14 +246,14 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                         // TODO: Implement background output handling (maybe just status indicator)
                         // For now, only print if active or maybe we print everything with channel prefix?
                         // Renderer::draw_output_line prints with channel name.
-                        
+
                         let text = String::from_utf8_lossy(&data);
                         let color = if Some(channel.as_str()) == active_channel.as_deref() {
                             crossterm::style::Color::White
                         } else {
                             crossterm::style::Color::DarkGrey
                         };
-                        
+
                         for line in text.lines() {
                              renderer.draw_output_line(&mut std::io::stdout(), &channel, line, color)?;
                         }
@@ -260,7 +265,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                             has_new_output: false,
                             exit_code: None,
                         }).collect();
-                        
+
                         // Update active channel from list if we don't know it
                         if active_channel.is_none() {
                              if let Some(c) = channels.first() {
@@ -296,20 +301,20 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                             }
                             _ => {} // Ignore other events for now
                         }
-                        // Request list to sync? Or just rely on events. 
+                        // Request list to sync? Or just rely on events.
                         // Events are fine.
                     }
                     ServerMessage::Error { message } => {
                          renderer.draw_output_line(
-                             &mut std::io::stdout(), 
-                             "SYSTEM", 
-                             &format!("Error: {}", message), 
+                             &mut std::io::stdout(),
+                             "SYSTEM",
+                             &format!("Error: {}", message),
                              crossterm::style::Color::Red
                          )?;
                     }
                     _ => {} // Ignore other server messages for now
                 }
-                
+
                 renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
                 renderer.draw_prompt(&mut std::io::stdout(), active_channel.as_deref(), &input_buffer)?;
             }
@@ -358,9 +363,9 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                     msg_tx.send(ClientMessage::SwitchChannel { name }).await?;
                                 }
                                 Ok(ParsedInput::SendToChannel { channel, command }) => {
-                                    msg_tx.send(ClientMessage::InputTo { 
-                                        channel, 
-                                        data: format!("{}\n", command).into_bytes() 
+                                    msg_tx.send(ClientMessage::InputTo {
+                                        channel,
+                                        data: format!("{}\n", command).into_bytes()
                                     }).await?;
                                 }
                                 Ok(ParsedInput::ControlCommand { command, args: _ }) => {
@@ -393,10 +398,10 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                      break;
                 }
             }
-            
+
             else => break, // All channels closed
         }
-        
+
         if should_exit {
             break;
         }
