@@ -51,8 +51,9 @@ impl ChannelManager {
 
         let channel_name = config.name.clone();
 
-        // TODO: Actually spawn the PTY
-        let channel = PtyChannel::spawn(config).await?;
+        // Spawn with notifier - output events go directly to event_sender
+        let channel =
+            PtyChannel::spawn_with_notifier(config, Some(self.event_sender.clone())).await?;
 
         // If this is the first channel, make it active and subscribed
         let is_first = self.channels.is_empty();
