@@ -5,22 +5,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Main configuration structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub general: GeneralConfig,
     pub appearance: AppearanceConfig,
     pub keybindings: KeybindingsConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            appearance: AppearanceConfig::default(),
-            keybindings: KeybindingsConfig::default(),
-        }
-    }
 }
 
 /// General settings
@@ -126,8 +116,8 @@ impl Config {
         self.general
             .runtime_dir
             .clone()
-            .or_else(|| dirs::runtime_dir())
-            .unwrap_or_else(|| std::env::temp_dir())
+            .or_else(dirs::runtime_dir)
+            .unwrap_or_else(std::env::temp_dir)
             .join("nexus")
     }
 
