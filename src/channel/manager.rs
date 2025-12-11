@@ -51,22 +51,9 @@ impl ChannelManager {
 
         let channel_name = config.name.clone();
 
-        let mut channel =
+        // Spawn with notifier - output events go directly to event_sender
+        let channel =
             PtyChannel::spawn_with_notifier(config, Some(self.event_sender.clone())).await?;
-        if let Some(mut rx) = channel.take_output_receiver() {
-            let tx = self.event_sender.clone();
-            let output_channel_name = channel_name.clone();
-            tokio::spawn(async move {
-                while let Some(data) = rx.recv().await {
-                    let _ = tx
-                        .send(ChannelManagerEvent::Output {
-                            channel_name: output_channel_name.clone(),
-                            data,
-                        })
-                        .await;
-                }
-            });
-        }
 
         // If this is the first channel, make it active and subscribed
         let is_first = self.channels.is_empty();

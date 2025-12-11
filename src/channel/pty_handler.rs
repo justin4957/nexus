@@ -49,7 +49,15 @@ impl PtyChannel {
         Self::spawn_with_notifier(config, None).await
     }
 
-    /// Spawn a new PTY channel with an optional event notifier
+    /// Spawn a new PTY channel with an optional event notifier.
+    ///
+    /// The `event_notifier` is used to send channel events (output data, state changes)
+    /// to the `ChannelManager`. When provided, output is sent directly via the notifier
+    /// instead of through the `output_rx` receiver to avoid duplicate sends.
+    ///
+    /// # Arguments
+    /// * `config` - Channel configuration (name, command, working directory, etc.)
+    /// * `event_notifier` - Optional sender for `ChannelManagerEvent`s
     pub async fn spawn_with_notifier(
         config: ChannelConfig,
         event_notifier: Option<mpsc::Sender<ChannelManagerEvent>>,
@@ -69,6 +77,10 @@ impl PtyChannel {
 
         let mut cmd = CommandBuilder::new(&command);
         cmd.cwd(&working_dir);
+
+        // Set TERM for proper terminal emulation
+        cmd.env("TERM", "xterm-256color");
+
         if let Some(env) = &config.env {
             for (key, value) in env {
                 cmd.env(key, value);
@@ -80,9 +92,11 @@ impl PtyChannel {
         let killer = Some(child.clone_killer());
         let state = Arc::new(RwLock::new(ChannelState::Running));
 
+        // Take reader and writer before wrapping master in Mutex to avoid potential deadlock
+        let mut reader = pair.master.try_clone_reader()?;
+        let writer = pair.master.take_writer()?;
         let master = Arc::new(Mutex::new(pair.master));
-        let mut reader = master.lock().await.try_clone_reader()?;
-        let writer = Arc::new(Mutex::new(master.lock().await.take_writer()?));
+        let writer = Arc::new(Mutex::new(writer));
 
         let (output_tx, output_rx) = mpsc::channel(64);
         let output_log_name = config.name.clone();
@@ -97,15 +111,35 @@ impl PtyChannel {
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        tracing::debug!("PTY EOF for channel '{}'", output_log_name);
+                        break;
+                    }
                     Ok(n) => {
                         let chunk = buf[..n].to_vec();
-                        let _ = output_tx.blocking_send(chunk.clone());
+
+                        // Send via notifier if available, otherwise via output_tx
+                        // This avoids duplicate sends when ChannelManager is listening
                         if let Some(notifier) = &notifier_for_output {
-                            let _ = notifier.blocking_send(ChannelManagerEvent::Output {
-                                channel_name: output_event_name.clone(),
-                                data: chunk,
-                            });
+                            if notifier
+                                .blocking_send(ChannelManagerEvent::Output {
+                                    channel_name: output_event_name.clone(),
+                                    data: chunk,
+                                })
+                                .is_err()
+                            {
+                                tracing::debug!(
+                                    "Event notifier closed for channel '{}'",
+                                    output_log_name
+                                );
+                                break;
+                            }
+                        } else if output_tx.blocking_send(chunk).is_err() {
+                            tracing::debug!(
+                                "Output channel closed for channel '{}'",
+                                output_log_name
+                            );
+                            break;
                         }
                     }
                     Err(err) => {
@@ -123,11 +157,20 @@ impl PtyChannel {
                 if let Ok(mut guard) = state_for_wait.write() {
                     *guard = ChannelState::Exited(code);
                 }
+                tracing::info!("Channel '{}' exited with code {:?}", wait_log_name, code);
                 if let Some(notifier) = event_notifier {
-                    let _ = notifier.blocking_send(ChannelManagerEvent::StateChanged {
-                        channel_name: wait_event_name.clone(),
-                        state: ChannelState::Exited(code),
-                    });
+                    if notifier
+                        .blocking_send(ChannelManagerEvent::StateChanged {
+                            channel_name: wait_event_name.clone(),
+                            state: ChannelState::Exited(code),
+                        })
+                        .is_err()
+                    {
+                        tracing::debug!(
+                            "Event notifier closed when reporting exit for '{}'",
+                            wait_log_name
+                        );
+                    }
                 }
             }
             Err(err) => {
@@ -145,10 +188,11 @@ impl PtyChannel {
         });
 
         tracing::info!(
-            "Spawning channel '{}' with command '{}' in '{}'",
+            "Spawned channel '{}' with command '{}' in '{}' (PID: {:?})",
             config.name,
             command,
-            working_dir.display()
+            working_dir.display(),
+            pid
         );
 
         Ok(Self {
@@ -231,7 +275,10 @@ impl PtyChannel {
         Ok(())
     }
 
-    /// Consume and return the output receiver for this channel
+    /// Consume and return the output receiver for this channel.
+    ///
+    /// Note: When the channel was created with an event notifier, output is sent
+    /// via the notifier and this receiver will not receive data.
     pub fn take_output_receiver(&mut self) -> Option<mpsc::Receiver<Vec<u8>>> {
         self.output_rx.take()
     }
