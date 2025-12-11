@@ -1,12 +1,8 @@
 //! nexus - A channel-based terminal manager with a unified prompt interface
 
-mod channel;
-mod client;
-mod config;
-mod protocol;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use nexus::client;
 
 #[derive(Parser)]
 #[command(name = "nexus")]
