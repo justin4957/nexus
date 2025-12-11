@@ -4,6 +4,7 @@ mod manager;
 mod pty_handler;
 
 pub use manager::ChannelManager;
+pub use manager::ChannelManagerEvent;
 pub use pty_handler::PtyChannel;
 
 use serde::{Deserialize, Serialize};
