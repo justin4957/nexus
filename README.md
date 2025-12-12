@@ -46,8 +46,16 @@ Unlike traditional terminal multiplexers (tmux, screen) that split your screen i
 git clone https://github.com/yourusername/nexus.git
 cd nexus
 cargo build --release
+
+# Copy both binaries to your bin directory
 cp target/release/nexus ~/.local/bin/
+cp target/release/nexus-server ~/.local/bin/
+
+# Or use a single command
+cp target/release/{nexus,nexus-server} ~/.local/bin/
 ```
+
+**Note**: Both `nexus` (client) and `nexus-server` binaries are required. The client spawns the server automatically when you start a session.
 
 ## Quick Start
 
