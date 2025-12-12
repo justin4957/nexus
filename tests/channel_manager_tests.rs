@@ -125,12 +125,12 @@ async fn test_send_input_to_active_channel() -> anyhow::Result<()> {
     // Verify output event is received
     let mut found_output = false;
     for _ in 0..10 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(2), event_rx.recv()).await {
-            if let ChannelManagerEvent::Output { channel_name, .. } = event {
-                if channel_name == "active" {
-                    found_output = true;
-                    break;
-                }
+        if let Ok(Some(ChannelManagerEvent::Output { channel_name, .. })) =
+            timeout(Duration::from_secs(2), event_rx.recv()).await
+        {
+            if channel_name == "active" {
+                found_output = true;
+                break;
             }
         }
     }
@@ -155,12 +155,12 @@ async fn test_send_input_to_specific_channel() -> anyhow::Result<()> {
     // Verify output event is received from chan2
     let mut found_output = false;
     for _ in 0..10 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(2), event_rx.recv()).await {
-            if let ChannelManagerEvent::Output { channel_name, .. } = event {
-                if channel_name == "chan2" {
-                    found_output = true;
-                    break;
-                }
+        if let Ok(Some(ChannelManagerEvent::Output { channel_name, .. })) =
+            timeout(Duration::from_secs(2), event_rx.recv()).await
+        {
+            if channel_name == "chan2" {
+                found_output = true;
+                break;
             }
         }
     }
@@ -196,16 +196,14 @@ async fn test_kill_channel() -> anyhow::Result<()> {
     // Wait for state change event
     let mut killed = false;
     for _ in 0..10 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(2), event_rx.recv()).await {
-            if let ChannelManagerEvent::StateChanged {
-                channel_name,
-                state,
-            } = event
-            {
-                if channel_name == "tokill" && matches!(state, ChannelState::Killed) {
-                    killed = true;
-                    break;
-                }
+        if let Ok(Some(ChannelManagerEvent::StateChanged {
+            channel_name,
+            state,
+        })) = timeout(Duration::from_secs(2), event_rx.recv()).await
+        {
+            if channel_name == "tokill" && matches!(state, ChannelState::Killed) {
+                killed = true;
+                break;
             }
         }
     }
@@ -250,7 +248,7 @@ async fn test_subscribe_to_channels() -> anyhow::Result<()> {
     );
     assert!(!manager.is_subscribed("chan2"));
 
-    manager.subscribe(&vec!["chan2".to_string()]);
+    manager.subscribe(&["chan2".to_string()]);
 
     assert!(manager.is_subscribed("chan2"));
 
@@ -265,12 +263,12 @@ async fn test_unsubscribe_from_channels() -> anyhow::Result<()> {
     manager.create_channel(ChannelConfig::new("chan1")).await?;
     manager.create_channel(ChannelConfig::new("chan2")).await?;
 
-    manager.subscribe(&vec!["chan2".to_string()]);
+    manager.subscribe(&["chan2".to_string()]);
 
     assert!(manager.is_subscribed("chan1"));
     assert!(manager.is_subscribed("chan2"));
 
-    manager.unsubscribe(&vec!["chan1".to_string()]);
+    manager.unsubscribe(&["chan1".to_string()]);
 
     assert!(!manager.is_subscribed("chan1"));
     assert!(manager.is_subscribed("chan2"));
@@ -290,16 +288,14 @@ async fn test_event_emission_on_create() -> anyhow::Result<()> {
     // Should receive a StateChanged event with Running state
     let mut found_running = false;
     for _ in 0..10 {
-        if let Ok(Some(event)) = timeout(Duration::from_millis(500), event_rx.recv()).await {
-            if let ChannelManagerEvent::StateChanged {
-                channel_name,
-                state,
-            } = event
-            {
-                if channel_name == "newevent" && matches!(state, ChannelState::Running) {
-                    found_running = true;
-                    break;
-                }
+        if let Ok(Some(ChannelManagerEvent::StateChanged {
+            channel_name,
+            state,
+        })) = timeout(Duration::from_millis(500), event_rx.recv()).await
+        {
+            if channel_name == "newevent" && matches!(state, ChannelState::Running) {
+                found_running = true;
+                break;
             }
         }
     }
@@ -323,16 +319,14 @@ async fn test_channel_exit_state_change() -> anyhow::Result<()> {
     // Wait for output and exit events
     let mut found_exit = false;
     for _ in 0..20 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(2), event_rx.recv()).await {
-            if let ChannelManagerEvent::StateChanged {
-                channel_name,
-                state,
-            } = event
-            {
-                if channel_name == "exiter" && matches!(state, ChannelState::Exited(_)) {
-                    found_exit = true;
-                    break;
-                }
+        if let Ok(Some(ChannelManagerEvent::StateChanged {
+            channel_name,
+            state,
+        })) = timeout(Duration::from_secs(2), event_rx.recv()).await
+        {
+            if channel_name == "exiter" && matches!(state, ChannelState::Exited(_)) {
+                found_exit = true;
+                break;
             }
         }
     }
