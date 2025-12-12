@@ -16,6 +16,9 @@ pub struct ClientConnection {
 
     /// Channel to send messages to this client
     sender: mpsc::Sender<ServerMessage>,
+
+    /// Channels this client is subscribed to
+    subscriptions: Vec<String>,
 }
 
 impl ClientConnection {
@@ -24,6 +27,7 @@ impl ClientConnection {
         Self {
             id: Uuid::new_v4(),
             sender,
+            subscriptions: Vec::new(),
         }
     }
 
@@ -38,6 +42,30 @@ impl ClientConnection {
             .send(msg)
             .await
             .map_err(|_| anyhow!("Failed to send message to client"))
+    }
+
+    /// Subscribe to channels
+    pub fn subscribe(&mut self, channels: &[String]) {
+        for channel in channels {
+            if !self.subscriptions.contains(channel) {
+                self.subscriptions.push(channel.clone());
+            }
+        }
+    }
+
+    /// Unsubscribe from channels
+    pub fn unsubscribe(&mut self, channels: &[String]) {
+        self.subscriptions.retain(|c| !channels.contains(c));
+    }
+
+    /// Check if subscribed to a channel
+    pub fn is_subscribed(&self, channel: &str) -> bool {
+        self.subscriptions.iter().any(|c| c == channel)
+    }
+
+    /// Get a list of current subscriptions
+    pub fn get_subscriptions(&self) -> Vec<String> {
+        self.subscriptions.clone()
     }
 }
 

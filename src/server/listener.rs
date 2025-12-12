@@ -150,18 +150,26 @@ async fn handle_client(stream: UnixStream, state: Arc<RwLock<ServerState>>) -> R
 
     // Create message channel for this client
     let (tx, rx) = mpsc::channel::<ServerMessage>(256);
-    let client = ClientConnection::new(tx);
+    let mut client = ClientConnection::new(tx);
     let client_id = client.id();
 
     tracing::info!("Client connected: {}", client_id);
 
-    // Get session ID for welcome message
-    let session_id = {
-        let mut state = state.write().await;
-        state.session.add_client(client_id);
-        state.clients.insert(client_id, client);
-        state.session.id()
+    // New clients subscribe to all existing channels by default.
+    // This ensures they see all output from the start.
+    let (session_id, initial_channels) = {
+        let state_guard = state.read().await;
+        let channel_names = state_guard.channel_manager.list_channels();
+        (state_guard.session.id(), channel_names)
     };
+    client.subscribe(&initial_channels);
+
+    // Add client to state
+    {
+        let mut state_guard = state.write().await;
+        state_guard.session.add_client(client_id);
+        state_guard.clients.insert(client_id, client);
+    }
 
     // Spawn writer task
     let writer_handle = tokio::spawn(client_writer_task(writer, rx));
@@ -292,7 +300,19 @@ async fn process_message(
 
         ClientMessage::ListChannels => {
             let state_guard = state.read().await;
-            let infos = state_guard.channel_manager.list_channels_info();
+            let client = state_guard.clients.get(&client_id).unwrap();
+            let active_channel = state_guard.channel_manager.active_channel();
+            let infos = state_guard
+                .channel_manager
+                .list_channels_info()
+                .into_iter()
+                .map(|(name, running)| crate::protocol::ChannelInfo {
+                    is_subscribed: client.is_subscribed(&name),
+                    is_active: active_channel == Some(&name),
+                    name,
+                    running,
+                })
+                .collect();
             Some(ServerMessage::ChannelList { channels: infos })
         }
 
@@ -317,12 +337,56 @@ async fn process_message(
             })
         }
 
+        ClientMessage::Subscribe { channels } => {
+            let state_clone = Arc::clone(state);
+            tokio::spawn(async move {
+                let all_channels = if channels.contains(&"*".to_string()) {
+                    let state_read = state_clone.read().await;
+                    state_read.channel_manager.list_channels()
+                } else {
+                    channels
+                };
+
+                let mut state_guard = state_clone.write().await;
+                if let Some(client) = state_guard.clients.get_mut(&client_id) {
+                    client.subscribe(&all_channels);
+                    let subs = client.get_subscriptions();
+                    let event = ServerMessage::Event(ChannelEvent::SubscriptionChanged {
+                        subscribed: subs,
+                    });
+
+                    if let Err(e) = client.send(event).await {
+                        tracing::warn!("Failed to send subscription change event: {}", e);
+                    }
+                }
+            });
+            None // No direct response, client gets an event
+        }
+
+        ClientMessage::Unsubscribe { channels } => {
+            let state_clone = Arc::clone(state);
+            tokio::spawn(async move {
+                let mut state_guard = state_clone.write().await;
+                if let Some(client) = state_guard.clients.get_mut(&client_id) {
+                    client.unsubscribe(&channels);
+
+                    let subs = client.get_subscriptions();
+                    let event = ServerMessage::Event(ChannelEvent::SubscriptionChanged {
+                        subscribed: subs,
+                    });
+
+                    if let Err(e) = client.send(event).await {
+                        tracing::warn!("Failed to send subscription change event: {}", e);
+                    }
+                }
+            });
+            None // No direct response, client gets an event
+        }
+
         // These will be implemented in Phase 2
         ClientMessage::Input { .. }
         | ClientMessage::InputTo { .. }
         | ClientMessage::SwitchChannel { .. }
-        | ClientMessage::Subscribe { .. }
-        | ClientMessage::Unsubscribe { .. }
         | ClientMessage::Resize { .. } => Some(create_error_message(
             "Channel operations not yet implemented".to_string(),
         )),
@@ -347,17 +411,23 @@ async fn broadcast_to_clients(msg: ServerMessage, state: &Arc<RwLock<ServerState
 async fn handle_channel_event(event: ChannelManagerEvent, state: &Arc<RwLock<ServerState>>) {
     match event {
         ChannelManagerEvent::Output { channel_name, data } => {
-            // Check if anyone is subscribed before broadcasting
+            let msg = ServerMessage::Output {
+                channel: channel_name.clone(),
+                data,
+                timestamp: chrono::Utc::now().timestamp_millis(),
+            };
+
             let state_read = state.read().await;
-            if state_read.channel_manager.is_subscribed(&channel_name) {
-                let msg = ServerMessage::Output {
-                    channel: channel_name,
-                    data,
-                    timestamp: chrono::Utc::now().timestamp_millis(),
-                };
-                // Drop read lock before calling broadcast, which will take a read lock again.
-                drop(state_read);
-                broadcast_to_clients(msg, state).await;
+            for client in state_read.clients.values() {
+                if client.is_subscribed(&channel_name) {
+                    if let Err(e) = client.send(msg.clone()).await {
+                        tracing::warn!(
+                            "Failed to send output to client {}: {}",
+                            client.id(),
+                            e
+                        );
+                    }
+                }
             }
         }
         ChannelManagerEvent::StateChanged {

@@ -7,6 +7,17 @@ use crossterm::{
 };
 use std::io::{self, Write};
 
+use std::collections::HashMap;
+
+const CHANNEL_COLORS: [Color; 6] = [
+    Color::Blue,
+    Color::Magenta,
+    Color::Cyan,
+    Color::Yellow,
+    Color::Green,
+    Color::Red,
+];
+
 /// Terminal renderer for nexus client
 pub struct Renderer {
     /// Terminal size (cols, rows)
@@ -20,6 +31,9 @@ pub struct Renderer {
 
     /// Whether to show timestamps
     show_timestamps: bool,
+
+    /// Map of channel names to colors
+    channel_colors: HashMap<String, Color>,
 }
 
 impl Renderer {
@@ -32,6 +46,7 @@ impl Renderer {
             status_bar_height: 1,
             prompt_height: 1,
             show_timestamps: false,
+            channel_colors: HashMap::new(),
         })
     }
 
@@ -101,15 +116,32 @@ impl Renderer {
         stdout.flush()
     }
 
+    /// Get a color for a channel, assigning a new one if necessary
+    fn get_channel_color(&mut self, channel_name: &str) -> Color {
+        if let Some(color) = self.channel_colors.get(channel_name) {
+            return *color;
+        }
+
+        let next_color_index = self.channel_colors.len() % CHANNEL_COLORS.len();
+        let new_color = CHANNEL_COLORS[next_color_index];
+        self.channel_colors
+            .insert(channel_name.to_string(), new_color);
+        new_color
+    }
+
     /// Draw a channel output line
     pub fn draw_output_line(
-        &self,
+        &mut self,
         stdout: &mut impl Write,
         channel_name: &str,
         line: &str,
-        channel_color: Color,
     ) -> io::Result<()> {
-        queue!(stdout, SetForegroundColor(channel_color))?;
+        let color = if channel_name == "SYSTEM" {
+            Color::Red
+        } else {
+            self.get_channel_color(channel_name)
+        };
+        queue!(stdout, SetForegroundColor(color))?;
         queue!(stdout, Print(format!("#{:<8}", channel_name)))?;
         queue!(stdout, ResetColor)?;
         queue!(stdout, Print(" │ "))?;
@@ -146,6 +178,7 @@ impl Default for Renderer {
             status_bar_height: 1,
             prompt_height: 1,
             show_timestamps: false,
+            channel_colors: HashMap::new(),
         })
     }
 }

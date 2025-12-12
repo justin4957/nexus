@@ -167,7 +167,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     // Actually, we'll just handle it in the loop
 
     // Setup UI
-    let renderer = Renderer::new()?;
+    let mut renderer = Renderer::new()?;
     Renderer::enter_raw_mode()?;
 
     // Channels for communication
@@ -248,14 +248,9 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                         // Renderer::draw_output_line prints with channel name.
 
                         let text = String::from_utf8_lossy(&data);
-                        let color = if Some(channel.as_str()) == active_channel.as_deref() {
-                            crossterm::style::Color::White
-                        } else {
-                            crossterm::style::Color::DarkGrey
-                        };
 
                         for line in text.lines() {
-                             renderer.draw_output_line(&mut std::io::stdout(), &channel, line, color)?;
+                             renderer.draw_output_line(&mut std::io::stdout(), &channel, line)?;
                         }
                     }
                     ServerMessage::ChannelList { channels: list } => {
@@ -308,8 +303,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                          renderer.draw_output_line(
                              &mut std::io::stdout(),
                              "SYSTEM",
-                             &format!("Error: {}", message),
-                             crossterm::style::Color::Red
+                             &format!("Error: {}", message)
                          )?;
                     }
                     _ => {} // Ignore other server messages for now
@@ -368,10 +362,20 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                         data: format!("{}\n", command).into_bytes()
                                     }).await?;
                                 }
-                                Ok(ParsedInput::ControlCommand { command, args: _ }) => {
+                                Ok(ParsedInput::ControlCommand { command, args }) => {
                                     match command.as_str() {
                                         "exit" | "quit" => should_exit = true,
                                         "list" => { msg_tx.send(ClientMessage::ListChannels).await?; },
+                                        "sub" | "subscribe" => {
+                                            if !args.is_empty() {
+                                                msg_tx.send(ClientMessage::Subscribe { channels: args }).await?;
+                                            }
+                                        },
+                                        "unsub" | "unsubscribe" => {
+                                            if !args.is_empty() {
+                                                msg_tx.send(ClientMessage::Unsubscribe { channels: args }).await?;
+                                            }
+                                        },
                                         _ => {
                                             // TODO: Implement other commands
                                         }
