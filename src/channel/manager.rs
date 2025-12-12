@@ -165,6 +165,19 @@ impl ChannelManager {
         self.channels.keys().cloned().collect()
     }
 
+    /// List detailed info for all channels
+    pub fn list_channels_info(&self) -> Vec<crate::protocol::ChannelInfo> {
+        self.channels
+            .values()
+            .map(|c| crate::protocol::ChannelInfo {
+                name: c.name().to_string(),
+                running: c.state().is_alive(),
+                is_active: self.active_channel() == Some(c.name()),
+                is_subscribed: self.is_subscribed(c.name()),
+            })
+            .collect()
+    }
+
     /// Resize all channels
     pub async fn resize_all(&mut self, cols: u16, rows: u16) -> Result<()> {
         for channel in self.channels.values_mut() {

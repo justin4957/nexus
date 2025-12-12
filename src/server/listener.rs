@@ -5,7 +5,10 @@ use super::connection::{
     read_message, ClientConnection,
 };
 use super::session::Session;
-use crate::protocol::{ClientMessage, ServerMessage, PROTOCOL_VERSION};
+use crate::{
+    channel::{ChannelManager, ChannelManagerEvent},
+    protocol::{ChannelEvent, ClientMessage, ServerMessage, PROTOCOL_VERSION},
+};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,6 +21,7 @@ use uuid::Uuid;
 struct ServerState {
     session: Session,
     clients: HashMap<Uuid, ClientConnection>,
+    channel_manager: ChannelManager,
 }
 
 /// Unix socket server listener
@@ -74,11 +78,24 @@ impl ServerListener {
         let listener = UnixListener::bind(&self.socket_path)?;
         tracing::info!("Server listening on {:?}", self.socket_path);
 
+        // Channel for manager -> server communication
+        let (event_tx, mut event_rx) = mpsc::channel::<ChannelManagerEvent>(256);
+
         // Initialize server state
         let state = Arc::new(RwLock::new(ServerState {
             session: Session::new(self.session_name.clone(), self.socket_path.clone()),
             clients: HashMap::new(),
+            channel_manager: ChannelManager::new(event_tx),
         }));
+
+        // Spawn the event handler task
+        let event_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                handle_channel_event(event, &event_state).await;
+            }
+            tracing::info!("Channel manager event loop finished");
+        });
 
         // Main server loop
         loop {
@@ -214,7 +231,7 @@ async fn handle_client(stream: UnixStream, state: Arc<RwLock<ServerState>>) -> R
 async fn process_message(
     msg: ClientMessage,
     client_id: Uuid,
-    _state: &Arc<RwLock<ServerState>>,
+    state: &Arc<RwLock<ServerState>>,
 ) -> Option<ServerMessage> {
     match msg {
         ClientMessage::Hello { protocol_version } => {
@@ -230,9 +247,53 @@ async fn process_message(
             })
         }
 
+        ClientMessage::CreateChannel {
+            name,
+            command,
+            working_dir,
+        } => {
+            let mut state_guard = state.write().await;
+            let config = crate::channel::ChannelConfig {
+                name: name.clone(),
+                command,
+                working_dir: working_dir.map(std::path::PathBuf::from),
+                env: None,
+                size: None, // TODO: Get from client
+            };
+            match state_guard.channel_manager.create_channel(config).await {
+                Ok(()) => {
+                    let created_event =
+                        ServerMessage::Event(ChannelEvent::Created { name: name.clone() });
+                    drop(state_guard); // Release write lock before broadcasting
+                    broadcast_to_clients(created_event, state).await;
+                    Some(ServerMessage::Ack {
+                        for_command: "CreateChannel".to_string(),
+                    })
+                }
+                Err(e) => Some(create_error_message(format!(
+                    "Failed to create channel: {}",
+                    e
+                ))),
+            }
+        }
+
+        ClientMessage::KillChannel { name } => {
+            let mut state_guard = state.write().await;
+            match state_guard.channel_manager.kill_channel(&name).await {
+                Ok(()) => Some(ServerMessage::Ack {
+                    for_command: "KillChannel".to_string(),
+                }),
+                Err(e) => Some(create_error_message(format!(
+                    "Failed to kill channel: {}",
+                    e
+                ))),
+            }
+        }
+
         ClientMessage::ListChannels => {
-            // TODO: Return actual channel list when channel manager is implemented
-            Some(ServerMessage::ChannelList { channels: vec![] })
+            let state_guard = state.read().await;
+            let infos = state_guard.channel_manager.list_channels_info();
+            Some(ServerMessage::ChannelList { channels: infos })
         }
 
         ClientMessage::GetStatus { channel: _ } => {
@@ -259,13 +320,65 @@ async fn process_message(
         // These will be implemented in Phase 2
         ClientMessage::Input { .. }
         | ClientMessage::InputTo { .. }
-        | ClientMessage::CreateChannel { .. }
-        | ClientMessage::KillChannel { .. }
         | ClientMessage::SwitchChannel { .. }
         | ClientMessage::Subscribe { .. }
         | ClientMessage::Unsubscribe { .. }
         | ClientMessage::Resize { .. } => Some(create_error_message(
             "Channel operations not yet implemented".to_string(),
         )),
+    }
+}
+
+/// Broadcasts a server message to all connected clients.
+async fn broadcast_to_clients(msg: ServerMessage, state: &Arc<RwLock<ServerState>>) {
+    let state = state.read().await;
+    for client in state.clients.values() {
+        if let Err(e) = client.send(msg.clone()).await {
+            tracing::warn!(
+                "Failed to broadcast message to client {}: {}",
+                client.id(),
+                e
+            );
+        }
+    }
+}
+
+/// Handles events coming from the ChannelManager.
+async fn handle_channel_event(event: ChannelManagerEvent, state: &Arc<RwLock<ServerState>>) {
+    match event {
+        ChannelManagerEvent::Output { channel_name, data } => {
+            // Check if anyone is subscribed before broadcasting
+            let state_read = state.read().await;
+            if state_read.channel_manager.is_subscribed(&channel_name) {
+                let msg = ServerMessage::Output {
+                    channel: channel_name,
+                    data,
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                };
+                // Drop read lock before calling broadcast, which will take a read lock again.
+                drop(state_read);
+                broadcast_to_clients(msg, state).await;
+            }
+        }
+        ChannelManagerEvent::StateChanged {
+            channel_name,
+            state: channel_state,
+        } => {
+            let server_event = match channel_state {
+                // We broadcast Created events from the message handler to get an Ack.
+                crate::channel::ChannelState::Running => None,
+                crate::channel::ChannelState::Exited(code) => Some(ChannelEvent::Exited {
+                    name: channel_name,
+                    exit_code: code,
+                }),
+                crate::channel::ChannelState::Killed => {
+                    Some(ChannelEvent::Killed { name: channel_name })
+                }
+                crate::channel::ChannelState::Starting => None,
+            };
+            if let Some(event) = server_event {
+                broadcast_to_clients(ServerMessage::Event(event), state).await;
+            }
+        }
     }
 }
