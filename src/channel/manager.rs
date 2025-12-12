@@ -93,6 +93,15 @@ impl ChannelManager {
         // Remove from subscriptions
         self.subscribed_channels.retain(|c| c != name);
 
+        // Send state change event
+        let _ = self
+            .event_sender
+            .send(ChannelManagerEvent::StateChanged {
+                channel_name: name.to_string(),
+                state: ChannelState::Killed,
+            })
+            .await;
+
         Ok(())
     }
 
