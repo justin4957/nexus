@@ -143,7 +143,7 @@ fn test_unframe_message_too_large() {
     let oversized_length = MAX_MESSAGE_SIZE + 1;
     let mut buffer = Vec::new();
     buffer.extend_from_slice(&oversized_length.to_be_bytes());
-    buffer.extend_from_slice(&vec![0u8; 100]); // Some dummy data
+    buffer.extend_from_slice(&[0u8; 100]); // Some dummy data
 
     let result = unframe_message(&buffer);
     assert!(result.is_err());
