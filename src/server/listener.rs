@@ -421,11 +421,7 @@ async fn handle_channel_event(event: ChannelManagerEvent, state: &Arc<RwLock<Ser
             for client in state_read.clients.values() {
                 if client.is_subscribed(&channel_name) {
                     if let Err(e) = client.send(msg.clone()).await {
-                        tracing::warn!(
-                            "Failed to send output to client {}: {}",
-                            client.id(),
-                            e
-                        );
+                        tracing::warn!("Failed to send output to client {}: {}", client.id(), e);
                     }
                 }
             }
