@@ -346,10 +346,7 @@ async fn broadcast_to_clients(msg: ServerMessage, state: &Arc<RwLock<ServerState
 /// Handles events coming from the ChannelManager.
 async fn handle_channel_event(event: ChannelManagerEvent, state: &Arc<RwLock<ServerState>>) {
     match event {
-        ChannelManagerEvent::Output {
-            channel_name,
-            data,
-        } => {
+        ChannelManagerEvent::Output { channel_name, data } => {
             // Check if anyone is subscribed before broadcasting
             let state_read = state.read().await;
             if state_read.channel_manager.is_subscribed(&channel_name) {
