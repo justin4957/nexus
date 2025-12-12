@@ -315,9 +315,7 @@ async fn test_channel_exit_state_change() -> anyhow::Result<()> {
     let mut manager = ChannelManager::new(event_tx);
 
     // Create a channel with default shell and send exit command
-    manager
-        .create_channel(ChannelConfig::new("exiter"))
-        .await?;
+    manager.create_channel(ChannelConfig::new("exiter")).await?;
 
     // Send exit command to make it exit
     manager.send_input_to("exiter", b"exit\n").await?;
