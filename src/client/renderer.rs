@@ -13,9 +13,25 @@ use crossterm::{
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{self, ClearType},
 };
+use regex::Regex;
 use std::io::{self, Write};
+use std::sync::LazyLock;
 
 use std::collections::{HashMap, HashSet};
+
+/// Regex to match ANSI escape sequences (colors, cursor movement, etc.)
+static ANSI_ESCAPE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches:
+    // - CSI sequences: ESC [ ... (letter or ~)
+    // - OSC sequences: ESC ] ... (BEL or ESC \)
+    // - Simple escape sequences: ESC (letter)
+    Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[a-zA-Z]").unwrap()
+});
+
+/// Strip ANSI escape sequences from a string
+pub fn strip_ansi_codes(s: &str) -> String {
+    ANSI_ESCAPE_RE.replace_all(s, "").to_string()
+}
 
 use crate::config::StatusBarPosition;
 
