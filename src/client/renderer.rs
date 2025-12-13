@@ -44,13 +44,6 @@ const CHANNEL_COLORS: [Color; 6] = [
     Color::Red,
 ];
 
-/// A single line of output with its channel name
-#[derive(Clone)]
-struct OutputLine {
-    channel: String,
-    content: String,
-}
-
 /// Welcome tips shown on first launch
 const WELCOME_TIPS: &[&str] = &[
     "Welcome to nexus - channel-based terminal multiplexer",
@@ -63,15 +56,19 @@ const WELCOME_TIPS: &[&str] = &[
     "  :clear             Clear the output area",
     "  :quit              Exit nexus (Ctrl+\\ also works)",
     "",
-    "Channels:",
-    "  [#channel]         Normal channel (gray)",
-    "  [#channel*]        Channel with new output (yellow)",
-    "  [#channel]         Active channel (green)",
-    "  [#channel: ✓]      Exited successfully (dark green)",
-    "  [#channel: ✗]      Exited with error (dark red)",
+    "Scrolling: Page Up/Down, Ctrl+U/D to scroll channel output",
     "",
     "Type a command to get started, or :new shell to create a shell channel.",
 ];
+
+/// View mode for output display
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    /// Show only active channel's output (clean, no prefix)
+    ActiveChannel,
+    /// Show all subscribed channels interleaved (with channel prefix)
+    AllChannels,
+}
 
 /// Terminal renderer for nexus client
 pub struct Renderer {
@@ -94,14 +91,23 @@ pub struct Renderer {
     /// Status bar position (top or bottom)
     status_bar_position: StatusBarPosition,
 
-    /// Buffer of output lines for scrolling
-    output_buffer: Vec<OutputLine>,
+    /// Per-channel output buffers
+    channel_buffers: HashMap<String, Vec<String>>,
 
-    /// Maximum lines to keep in buffer (for memory management)
+    /// Scroll offset per channel (0 = at bottom/most recent)
+    scroll_offsets: HashMap<String, usize>,
+
+    /// Maximum lines to keep in buffer per channel
     max_buffer_lines: usize,
 
     /// Whether to show welcome tips (hidden once output appears)
     show_welcome: bool,
+
+    /// Current view mode
+    view_mode: ViewMode,
+
+    /// Buffer for interleaved "all channels" view
+    interleaved_buffer: Vec<(String, String)>, // (channel, content)
 }
 
 impl Renderer {
@@ -121,9 +127,12 @@ impl Renderer {
             show_timestamps: false,
             channel_colors: HashMap::new(),
             status_bar_position: position,
-            output_buffer: Vec::new(),
-            max_buffer_lines: 10000, // Keep up to 10k lines in memory
+            channel_buffers: HashMap::new(),
+            scroll_offsets: HashMap::new(),
+            max_buffer_lines: 10000,
             show_welcome: true,
+            view_mode: ViewMode::ActiveChannel,
+            interleaved_buffer: Vec::new(),
         })
     }
 
@@ -131,6 +140,59 @@ impl Renderer {
     #[allow(dead_code)]
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.size = (cols, rows);
+    }
+
+    /// Get current view mode
+    pub fn view_mode(&self) -> ViewMode {
+        self.view_mode
+    }
+
+    /// Set view mode
+    pub fn set_view_mode(&mut self, mode: ViewMode) {
+        self.view_mode = mode;
+    }
+
+    /// Toggle between view modes
+    pub fn toggle_view_mode(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::ActiveChannel => ViewMode::AllChannels,
+            ViewMode::AllChannels => ViewMode::ActiveChannel,
+        };
+    }
+
+    /// Scroll up in the current channel
+    pub fn scroll_up(&mut self, channel: Option<&str>, lines: usize) {
+        if let Some(ch) = channel {
+            let buffer_len = self.channel_buffers.get(ch).map(|b| b.len()).unwrap_or(0);
+            let visible = self.visible_output_rows();
+            let max_scroll = buffer_len.saturating_sub(visible);
+
+            let offset = self.scroll_offsets.entry(ch.to_string()).or_insert(0);
+            *offset = (*offset + lines).min(max_scroll);
+        }
+    }
+
+    /// Scroll down in the current channel
+    pub fn scroll_down(&mut self, channel: Option<&str>, lines: usize) {
+        if let Some(ch) = channel {
+            let offset = self.scroll_offsets.entry(ch.to_string()).or_insert(0);
+            *offset = offset.saturating_sub(lines);
+        }
+    }
+
+    /// Scroll to bottom (most recent) in the current channel
+    pub fn scroll_to_bottom(&mut self, channel: Option<&str>) {
+        if let Some(ch) = channel {
+            self.scroll_offsets.insert(ch.to_string(), 0);
+        }
+    }
+
+    /// Check if scrolled up from bottom
+    pub fn is_scrolled(&self, channel: Option<&str>) -> bool {
+        channel
+            .and_then(|ch| self.scroll_offsets.get(ch))
+            .map(|&o| o > 0)
+            .unwrap_or(false)
     }
 
     /// Height available for output
@@ -166,6 +228,14 @@ impl Renderer {
         let ellipsis = " ...";
         let ellipsis_width = ellipsis.len();
 
+        // Add view mode indicator
+        let mode_indicator = match self.view_mode {
+            ViewMode::ActiveChannel => "[channel]",
+            ViewMode::AllChannels => "[all]",
+        };
+        segments.push((mode_indicator.to_string(), Color::DarkGrey));
+        total_width += mode_indicator.len() + 1;
+
         for channel in channels {
             let color = if Some(channel.name.as_str()) == active_channel {
                 Color::Green
@@ -189,16 +259,14 @@ impl Renderer {
             // Check if adding this segment would exceed terminal width
             if total_width + segment_width > terminal_width.saturating_sub(ellipsis_width) {
                 // Check if we have more channels to show
-                let remaining = channels.len() - segments.len();
+                let remaining = channels.len() - (segments.len() - 1); // -1 for mode indicator
                 if remaining > 0 {
                     segments.push((ellipsis.to_string(), Color::DarkGrey));
                 }
                 break;
             }
 
-            if !segments.is_empty() {
-                total_width += 1; // Space between segments
-            }
+            total_width += 1; // Space between segments
             total_width += segment.len();
             segments.push((segment, color));
         }
@@ -228,6 +296,12 @@ impl Renderer {
             queue!(stdout, Print(segment))?;
         }
 
+        // Add scroll indicator if scrolled up
+        if self.is_scrolled(active_channel) {
+            queue!(stdout, SetForegroundColor(Color::Yellow))?;
+            queue!(stdout, Print(" ↑scroll"))?;
+        }
+
         queue!(stdout, ResetColor)?;
         stdout.flush()
     }
@@ -242,10 +316,6 @@ impl Renderer {
         let prompt_row = self.prompt_row();
         queue!(stdout, cursor::MoveTo(0, prompt_row))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-
-        // Draw left border
-        queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
-        queue!(stdout, Print("│ "))?;
 
         // Draw channel name with color
         let channel_display = active_channel.unwrap_or("none");
@@ -293,7 +363,7 @@ impl Renderer {
     }
 
     /// Get the number of visible output rows
-    fn visible_output_rows(&self) -> usize {
+    pub fn visible_output_rows(&self) -> usize {
         // Output area: from row 2 to row n-3 (inclusive)
         // Row 0: status bar, Row 1: separator, Row n-2: separator, Row n-1: prompt
         self.size.1.saturating_sub(4) as usize
@@ -304,8 +374,30 @@ impl Renderer {
         2 // After status bar (row 0) and separator (row 1)
     }
 
-    /// Draw a single output line at a specific row
-    fn draw_line_at_row(
+    /// Draw a single output line at a specific row (clean mode - no prefix)
+    fn draw_clean_line_at_row(
+        &self,
+        stdout: &mut impl Write,
+        row: u16,
+        content: &str,
+    ) -> io::Result<()> {
+        queue!(stdout, cursor::MoveTo(0, row))?;
+        queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+
+        // Truncate line if it's too long
+        let max_line_len = self.size.0 as usize;
+        let display_line = if content.len() > max_line_len && max_line_len > 0 {
+            &content[..max_line_len]
+        } else {
+            content
+        };
+        queue!(stdout, Print(display_line))?;
+
+        Ok(())
+    }
+
+    /// Draw a single output line at a specific row (with channel prefix)
+    fn draw_prefixed_line_at_row(
         &mut self,
         stdout: &mut impl Write,
         row: u16,
@@ -401,43 +493,104 @@ impl Renderer {
         Ok(())
     }
 
-    /// Redraw all visible output lines from the buffer
-    fn redraw_output_area(&mut self, stdout: &mut impl Write) -> io::Result<()> {
-        // Show welcome tips if buffer is empty and welcome is enabled
-        if self.output_buffer.is_empty() && self.show_welcome {
-            return self.draw_welcome_tips(stdout);
-        }
-
+    /// Redraw output area for active channel mode (clean, no prefix)
+    fn redraw_channel_output(
+        &self,
+        stdout: &mut impl Write,
+        channel: Option<&str>,
+    ) -> io::Result<()> {
         let visible_rows = self.visible_output_rows();
         let start_row = self.output_start_row();
 
-        // Calculate which lines from buffer to show (most recent ones)
-        let buffer_len = self.output_buffer.len();
-        let skip_count = buffer_len.saturating_sub(visible_rows);
+        let (lines, scroll_offset) = if let Some(ch) = channel {
+            let buffer = self.channel_buffers.get(ch);
+            let offset = self.scroll_offsets.get(ch).copied().unwrap_or(0);
+            (buffer, offset)
+        } else {
+            (None, 0)
+        };
 
-        // Clone the visible lines to avoid borrow issues
-        let visible_lines: Vec<OutputLine> = self
-            .output_buffer
-            .iter()
-            .skip(skip_count)
-            .cloned()
-            .collect();
-
-        // Clear and redraw each row in the output area
-        for (i, line) in visible_lines.iter().enumerate() {
-            let row = start_row + i as u16;
-            self.draw_line_at_row(stdout, row, &line.channel, &line.content)?;
-        }
-
-        // Clear any remaining rows (if buffer has fewer lines than visible area)
-        let lines_drawn = visible_lines.len();
-        for i in lines_drawn..visible_rows {
+        // Clear all output rows first
+        for i in 0..visible_rows {
             let row = start_row + i as u16;
             queue!(stdout, cursor::MoveTo(0, row))?;
             queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
         }
 
+        if let Some(buffer) = lines {
+            let buffer_len = buffer.len();
+            // Calculate start index accounting for scroll offset
+            // scroll_offset 0 = bottom (most recent), higher = scrolled up
+            let end_idx = buffer_len.saturating_sub(scroll_offset);
+            let start_idx = end_idx.saturating_sub(visible_rows);
+
+            let visible_lines: Vec<&str> = buffer[start_idx..end_idx]
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+
+            for (i, line) in visible_lines.iter().enumerate() {
+                let row = start_row + i as u16;
+                self.draw_clean_line_at_row(stdout, row, line)?;
+            }
+        }
+
         Ok(())
+    }
+
+    /// Redraw output area for all channels mode (interleaved with prefix)
+    fn redraw_interleaved_output(&mut self, stdout: &mut impl Write) -> io::Result<()> {
+        let visible_rows = self.visible_output_rows();
+        let start_row = self.output_start_row();
+
+        // Clear all output rows first
+        for i in 0..visible_rows {
+            let row = start_row + i as u16;
+            queue!(stdout, cursor::MoveTo(0, row))?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+        }
+
+        let buffer_len = self.interleaved_buffer.len();
+        let skip_count = buffer_len.saturating_sub(visible_rows);
+
+        let visible_lines: Vec<(String, String)> = self
+            .interleaved_buffer
+            .iter()
+            .skip(skip_count)
+            .cloned()
+            .collect();
+
+        for (i, (channel, content)) in visible_lines.iter().enumerate() {
+            let row = start_row + i as u16;
+            self.draw_prefixed_line_at_row(stdout, row, channel, content)?;
+        }
+
+        Ok(())
+    }
+
+    /// Redraw all visible output lines from the buffer
+    pub fn redraw_output_area(
+        &mut self,
+        stdout: &mut impl Write,
+        active_channel: Option<&str>,
+    ) -> io::Result<()> {
+        // Check if we have any output at all
+        let has_output = !self.channel_buffers.is_empty()
+            || !self.interleaved_buffer.is_empty()
+            || active_channel
+                .and_then(|ch| self.channel_buffers.get(ch))
+                .map(|b| !b.is_empty())
+                .unwrap_or(false);
+
+        // Show welcome tips if no output and welcome is enabled
+        if !has_output && self.show_welcome {
+            return self.draw_welcome_tips(stdout);
+        }
+
+        match self.view_mode {
+            ViewMode::ActiveChannel => self.redraw_channel_output(stdout, active_channel),
+            ViewMode::AllChannels => self.redraw_interleaved_output(stdout),
+        }
     }
 
     /// Draw a channel output line with proper scrolling
@@ -446,31 +599,56 @@ impl Renderer {
         stdout: &mut impl Write,
         channel_name: &str,
         line: &str,
+        active_channel: Option<&str>,
     ) -> io::Result<()> {
         // Hide welcome tips once we have actual output
         self.show_welcome = false;
 
-        // Add line to buffer
-        self.output_buffer.push(OutputLine {
-            channel: channel_name.to_string(),
-            content: line.to_string(),
-        });
+        // Add to channel-specific buffer
+        let buffer = self
+            .channel_buffers
+            .entry(channel_name.to_string())
+            .or_default();
+        buffer.push(line.to_string());
 
         // Trim buffer if it exceeds max size
-        if self.output_buffer.len() > self.max_buffer_lines {
-            let excess = self.output_buffer.len() - self.max_buffer_lines;
-            self.output_buffer.drain(0..excess);
+        if buffer.len() > self.max_buffer_lines {
+            let excess = buffer.len() - self.max_buffer_lines;
+            buffer.drain(0..excess);
         }
 
-        // Redraw the entire output area with scrolling
-        self.redraw_output_area(stdout)?;
+        // Also add to interleaved buffer for "all channels" view
+        self.interleaved_buffer
+            .push((channel_name.to_string(), line.to_string()));
+        if self.interleaved_buffer.len() > self.max_buffer_lines {
+            let excess = self.interleaved_buffer.len() - self.max_buffer_lines;
+            self.interleaved_buffer.drain(0..excess);
+        }
+
+        // Auto-scroll to bottom when new output arrives (if not manually scrolled)
+        if !self.is_scrolled(Some(channel_name)) {
+            self.scroll_to_bottom(Some(channel_name));
+        }
+
+        // Redraw the output area
+        self.redraw_output_area(stdout, active_channel)?;
 
         stdout.flush()
     }
 
-    /// Clear the output buffer (e.g., for :clear command)
-    pub fn clear_output_buffer(&mut self) {
-        self.output_buffer.clear();
+    /// Clear the output buffer for a specific channel or all
+    pub fn clear_output_buffer(&mut self, channel: Option<&str>) {
+        match channel {
+            Some(ch) => {
+                self.channel_buffers.remove(ch);
+                self.scroll_offsets.remove(ch);
+            }
+            None => {
+                self.channel_buffers.clear();
+                self.scroll_offsets.clear();
+                self.interleaved_buffer.clear();
+            }
+        }
     }
 
     /// Enter raw mode for terminal
@@ -504,7 +682,7 @@ impl Renderer {
         self.draw_status_bar(stdout, channels, active_channel)?;
 
         // Redraw output area from buffer
-        self.redraw_output_area(stdout)?;
+        self.redraw_output_area(stdout, active_channel)?;
 
         // Draw separator line below status bar (if top position)
         if matches!(self.status_bar_position, StatusBarPosition::Top) {
@@ -539,9 +717,12 @@ impl Default for Renderer {
             show_timestamps: false,
             channel_colors: HashMap::new(),
             status_bar_position: StatusBarPosition::Top,
-            output_buffer: Vec::new(),
+            channel_buffers: HashMap::new(),
+            scroll_offsets: HashMap::new(),
             max_buffer_lines: 10000,
             show_welcome: true,
+            view_mode: ViewMode::ActiveChannel,
+            interleaved_buffer: Vec::new(),
         })
     }
 }
