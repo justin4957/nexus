@@ -210,13 +210,27 @@ impl Renderer {
         new_color
     }
 
+    /// Get the output area row - the row above the separator line
+    fn output_row(&self) -> u16 {
+        // Output appears above the separator which is at row n-2
+        self.size.1.saturating_sub(3)
+    }
+
     /// Draw a channel output line
+    /// This prints output on the line above the separator, pushing content up
     pub fn draw_output_line(
         &mut self,
         stdout: &mut impl Write,
         channel_name: &str,
         line: &str,
     ) -> io::Result<()> {
+        // Move to the output row (line above separator)
+        let output_row = self.output_row();
+        queue!(stdout, cursor::MoveTo(0, output_row))?;
+
+        // Insert a new line at this position (this pushes content up)
+        queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+
         let color = if channel_name == "SYSTEM" {
             Color::Red
         } else {
@@ -226,8 +240,17 @@ impl Renderer {
         queue!(stdout, Print(format!("#{:<8}", channel_name)))?;
         queue!(stdout, ResetColor)?;
         queue!(stdout, Print(" │ "))?;
-        queue!(stdout, Print(line))?;
-        queue!(stdout, Print("\n"))?;
+
+        // Truncate line if it's too long
+        let prefix_len = 10; // "#channel  │ "
+        let max_line_len = self.size.0 as usize - prefix_len;
+        if line.len() > max_line_len {
+            queue!(stdout, Print(&line[..max_line_len]))?;
+        } else {
+            queue!(stdout, Print(line))?;
+        }
+
+        queue!(stdout, Print("\r\n"))?;
 
         stdout.flush()
     }
@@ -242,13 +265,47 @@ impl Renderer {
         terminal::disable_raw_mode()
     }
 
-    /// Clear the screen
+    /// Clear the screen and set up the UI layout
     pub fn clear(stdout: &mut impl Write) -> io::Result<()> {
         execute!(
             stdout,
             terminal::Clear(ClearType::All),
             cursor::MoveTo(0, 0)
         )
+    }
+
+    /// Draw a full UI refresh with separators
+    pub fn draw_full_ui(
+        &mut self,
+        stdout: &mut impl Write,
+        channels: &[ChannelStatusInfo],
+        active_channel: Option<&str>,
+        input: &str,
+    ) -> io::Result<()> {
+        // Draw status bar
+        self.draw_status_bar(stdout, channels, active_channel)?;
+
+        // Draw separator line below status bar (if top position)
+        if matches!(self.status_bar_position, StatusBarPosition::Top) {
+            queue!(stdout, cursor::MoveTo(0, 1))?;
+            queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+            let separator = "─".repeat(self.size.0 as usize);
+            queue!(stdout, Print(&separator))?;
+            queue!(stdout, ResetColor)?;
+        }
+
+        // Draw separator line above prompt
+        let separator_row = self.size.1.saturating_sub(2);
+        queue!(stdout, cursor::MoveTo(0, separator_row))?;
+        queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+        let separator = "─".repeat(self.size.0 as usize);
+        queue!(stdout, Print(&separator))?;
+        queue!(stdout, ResetColor)?;
+
+        // Draw prompt
+        self.draw_prompt(stdout, active_channel, input)?;
+
+        stdout.flush()
     }
 }
 
