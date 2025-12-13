@@ -298,6 +298,16 @@ impl PtyChannel {
         self.pid
     }
 
+    /// Get working directory path
+    pub fn working_dir(&self) -> &PathBuf {
+        &self.working_dir
+    }
+
+    /// Get configured command
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
     /// Get channel name
     pub fn name(&self) -> &str {
         &self.name
