@@ -336,9 +336,25 @@ async fn process_message(
             Some(ServerMessage::ChannelList { channels: infos })
         }
 
-        ClientMessage::GetStatus { channel: _ } => {
-            // TODO: Return actual status when channel manager is implemented
-            Some(ServerMessage::Status { channels: vec![] })
+        ClientMessage::GetStatus { channel } => {
+            let state_guard = state.read().await;
+            let statuses = state_guard
+                .channel_manager
+                .list_channel_status()
+                .into_iter()
+                .filter(|status| channel.as_ref().map(|c| &status.name == c).unwrap_or(true))
+                .map(|status| crate::protocol::ChannelStatus {
+                    name: status.name,
+                    pid: status.pid,
+                    running: status.running,
+                    exit_code: status.exit_code,
+                    working_dir: status.working_dir,
+                    command: status.command,
+                    created_at: 0,
+                    output_lines: status.output_lines,
+                })
+                .collect();
+            Some(ServerMessage::Status { channels: statuses })
         }
 
         ClientMessage::Detach => {

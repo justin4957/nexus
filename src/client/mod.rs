@@ -1,8 +1,10 @@
 //! Client - user-facing terminal interface
 
+mod commands;
 mod input;
 mod renderer;
 
+use crate::client::commands::{handle_control_command, CommandResult};
 use crate::client::input::{parse_input, ParsedInput};
 use crate::client::renderer::{ChannelStatusInfo, Renderer};
 use crate::config::Config;
@@ -235,6 +237,31 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                     ServerMessage::Welcome { .. } => {
                         // Connected
                     }
+                    ServerMessage::Status { channels: status } => {
+                        if status.is_empty() {
+                            renderer.draw_output_line(
+                                &mut std::io::stdout(),
+                                "SYSTEM",
+                                "No status available.",
+                            )?;
+                        } else {
+                            for s in status {
+                                renderer.draw_output_line(
+                                    &mut std::io::stdout(),
+                                    "SYSTEM",
+                                    &format!(
+                                        "#{} {} pid={:?} exit={:?} cwd={} cmd={}",
+                                        s.name,
+                                        if s.running { "running" } else { "stopped" },
+                                        s.pid,
+                                        s.exit_code,
+                                        s.working_dir,
+                                        s.command
+                                    ),
+                                )?;
+                            }
+                        }
+                    }
                     ServerMessage::Output { channel, data, .. } => {
                         // Mark channel as having output
                         if let Some(c) = channels.iter_mut().find(|c| c.name == channel) {
@@ -400,72 +427,18 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                     }).await?;
                                 }
                                 Ok(ParsedInput::ControlCommand { command, args }) => {
-                                    match command.as_str() {
-                                        "exit" | "quit" => should_exit = true,
-                                        "list" => { msg_tx.send(ClientMessage::ListChannels).await?; },
-                                        "sub" | "subscribe" => {
-                                            if args.is_empty() {
-                                                renderer.draw_output_line(
-                                                    &mut std::io::stdout(),
-                                                    "SYSTEM",
-                                                    "Usage: :sub <channel1> [channel2...] or :sub * for all",
-                                                )?;
-                                                renderer.draw_output_line(
-                                                    &mut std::io::stdout(),
-                                                    "SYSTEM",
-                                                    &format!(
-                                                        "Current subscriptions: {}",
-                                                        if subscriptions.is_empty() {
-                                                            "none".to_string()
-                                                        } else {
-                                                            subscriptions.join(", ")
-                                                        }
-                                                    ),
-                                                )?;
-                                            } else {
-                                                msg_tx.send(ClientMessage::Subscribe { channels: args }).await?;
-                                            }
-                                        },
-                                        "unsub" | "unsubscribe" => {
-                                            if args.is_empty() {
-                                                renderer.draw_output_line(
-                                                    &mut std::io::stdout(),
-                                                    "SYSTEM",
-                                                    "Usage: :unsub <channel1> [channel2...]",
-                                                )?;
-                                                renderer.draw_output_line(
-                                                    &mut std::io::stdout(),
-                                                    "SYSTEM",
-                                                    &format!(
-                                                        "Current subscriptions: {}",
-                                                        if subscriptions.is_empty() {
-                                                            "none".to_string()
-                                                        } else {
-                                                            subscriptions.join(", ")
-                                                        }
-                                                    ),
-                                                )?;
-                                            } else {
-                                                msg_tx.send(ClientMessage::Unsubscribe { channels: args }).await?;
-                                            }
-                                        },
-                                        "subs" | "subscriptions" => {
-                                            renderer.draw_output_line(
-                                                &mut std::io::stdout(),
-                                                "SYSTEM",
-                                                &format!(
-                                                    "Current subscriptions: {}",
-                                                    if subscriptions.is_empty() {
-                                                        "none".to_string()
-                                                    } else {
-                                                        subscriptions.join(", ")
-                                                    }
-                                                ),
-                                            )?;
-                                        },
-                                        _ => {
-                                            // TODO: Implement other commands
-                                        }
+                                    match handle_control_command(
+                                        &command,
+                                        args,
+                                        &mut renderer,
+                                        &msg_tx,
+                                        &channels,
+                                        &mut active_channel,
+                                        &subscriptions,
+                                        &input_buffer,
+                                    ).await? {
+                                        CommandResult::Exit => should_exit = true,
+                                        CommandResult::Continue => {}
                                     }
                                 }
                                 Err(_e) => {

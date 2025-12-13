@@ -13,6 +13,19 @@ pub struct ChannelListItem {
     pub is_active: bool,
 }
 
+/// Detailed channel status snapshot
+#[derive(Debug, Clone)]
+pub struct ChannelStatusItem {
+    pub name: String,
+    pub running: bool,
+    pub exit_code: Option<i32>,
+    pub pid: Option<u32>,
+    pub working_dir: String,
+    pub command: String,
+    pub output_lines: usize,
+    pub is_active: bool,
+}
+
 /// Event emitted by channels
 #[derive(Debug, Clone)]
 pub enum ChannelManagerEvent {
@@ -182,6 +195,32 @@ impl ChannelManager {
                 name: c.name().to_string(),
                 running: c.state().is_alive(),
                 is_active: active.as_deref() == Some(c.name()),
+            })
+            .collect()
+    }
+
+    /// List channel status details
+    pub fn list_channel_status(&self) -> Vec<ChannelStatusItem> {
+        let active = self.active_channel().map(|name| name.to_string());
+        self.channels
+            .values()
+            .map(|c| {
+                let state = c.state();
+                let (running, exit_code) = match state {
+                    ChannelState::Running | ChannelState::Starting => (true, None),
+                    ChannelState::Exited(code) => (false, code),
+                    ChannelState::Killed => (false, None),
+                };
+                ChannelStatusItem {
+                    name: c.name().to_string(),
+                    running,
+                    exit_code,
+                    pid: c.pid(),
+                    working_dir: c.working_dir().to_string_lossy().to_string(),
+                    command: c.command().to_string(),
+                    output_lines: 0,
+                    is_active: active.as_deref() == Some(c.name()),
+                }
             })
             .collect()
     }
