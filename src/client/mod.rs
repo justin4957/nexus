@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::protocol::{ChannelEvent, ClientMessage, ServerMessage};
 use crate::server::connection::{read_message, write_message};
 use anyhow::{anyhow, Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -156,6 +156,39 @@ pub async fn attach_or_create(name: &str) -> Result<()> {
     start_new_session(name).await
 }
 
+/// Handle scroll keys when input buffer is empty
+/// Returns true if a scroll key was handled
+fn handle_scroll_keys(key: &KeyEvent, renderer: &mut Renderer, channel: Option<&str>) -> bool {
+    match key.code {
+        KeyCode::PageUp => {
+            let page = renderer.visible_output_rows();
+            renderer.scroll_up(channel, page);
+            true
+        }
+        KeyCode::PageDown => {
+            let page = renderer.visible_output_rows();
+            renderer.scroll_down(channel, page);
+            true
+        }
+        KeyCode::Home => {
+            // Scroll to top (oldest)
+            renderer.scroll_up(channel, usize::MAX);
+            true
+        }
+        KeyCode::End => {
+            // Scroll to bottom (most recent)
+            renderer.scroll_to_bottom(channel);
+            true
+        }
+        KeyCode::Tab => {
+            // Toggle view mode
+            renderer.toggle_view_mode();
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Main client loop
 async fn run_client_loop(stream: UnixStream) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
@@ -249,6 +282,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                 &mut std::io::stdout(),
                                 "SYSTEM",
                                 "No status available.",
+                                active_channel.as_deref(),
                             )?;
                         } else {
                             for s in status {
@@ -264,6 +298,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                         s.working_dir,
                                         s.command
                                     ),
+                                    active_channel.as_deref(),
                                 )?;
                             }
                         }
@@ -304,7 +339,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                 continue;
                             }
 
-                            renderer.draw_output_line(&mut std::io::stdout(), &channel, clean_line)?;
+                            renderer.draw_output_line(&mut std::io::stdout(), &channel, clean_line, active_channel.as_deref())?;
                         }
 
                         // Redraw status bar and prompt after output
@@ -373,12 +408,8 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                 if let Some(c) = channels.iter_mut().find(|c| c.name == name) {
                                     c.has_new_output = false;
                                 }
-                                // Show channel switch message (don't clear - preserve log history)
-                                renderer.draw_output_line(
-                                    &mut std::io::stdout(),
-                                    "SYSTEM",
-                                    &format!("Switched to channel: #{}", name),
-                                )?;
+                                // Redraw output for the new active channel
+                                renderer.redraw_output_area(&mut std::io::stdout(), active_channel.as_deref())?;
                             }
                             ChannelEvent::SubscriptionChanged { subscribed } => {
                                 subscriptions = subscribed.clone();
@@ -393,6 +424,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                             subscriptions.join(", ")
                                         }
                                     ),
+                                    active_channel.as_deref(),
                                 )?;
                             }
                         }
@@ -401,7 +433,8 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                          renderer.draw_output_line(
                              &mut std::io::stdout(),
                              "SYSTEM",
-                             &format!("Error: {}", message)
+                             &format!("Error: {}", message),
+                             active_channel.as_deref(),
                          )?;
                     }
                     _ => {} // Ignore other server messages for now
@@ -414,6 +447,27 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
             // Handle user input
             Some(event) = input_rx.recv() => {
                 if let Event::Key(key) = event {
+                    // Handle scrolling and view mode when input is empty
+                    if input_buffer.is_empty()
+                        && handle_scroll_keys(&key, &mut renderer, active_channel.as_deref())
+                    {
+                        renderer.redraw_output_area(
+                            &mut std::io::stdout(),
+                            active_channel.as_deref(),
+                        )?;
+                        renderer.draw_status_bar(
+                            &mut std::io::stdout(),
+                            &channels,
+                            active_channel.as_deref(),
+                        )?;
+                        renderer.draw_prompt(
+                            &mut std::io::stdout(),
+                            active_channel.as_deref(),
+                            &input_buffer,
+                        )?;
+                        continue;
+                    }
+
                     match key.code {
                         KeyCode::Char(c) => {
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -435,10 +489,26 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                             msg_tx.send(ClientMessage::Input { data: vec![4] }).await?;
                                          }
                                     }
+                                    'u' => {
+                                        // Scroll up half page
+                                        let half_page = renderer.visible_output_rows() / 2;
+                                        renderer.scroll_up(active_channel.as_deref(), half_page.max(1));
+                                        renderer.redraw_output_area(&mut std::io::stdout(), active_channel.as_deref())?;
+                                        renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
+                                    }
+                                    'b' => {
+                                        // Scroll down half page
+                                        let half_page = renderer.visible_output_rows() / 2;
+                                        renderer.scroll_down(active_channel.as_deref(), half_page.max(1));
+                                        renderer.redraw_output_area(&mut std::io::stdout(), active_channel.as_deref())?;
+                                        renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
+                                    }
                                     _ => {} // Ignore other control chars
                                 }
                             } else {
                                 input_buffer.push(c);
+                                // Auto-scroll to bottom when user starts typing
+                                renderer.scroll_to_bottom(active_channel.as_deref());
                             }
                         }
                         KeyCode::Backspace => {
