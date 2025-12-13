@@ -333,8 +333,8 @@ impl Renderer {
         queue!(stdout, ResetColor)?;
 
         // Calculate prompt prefix length for cursor positioning
-        // "@channel ❯ " - the ❯ is 3 bytes in UTF-8
-        let prefix_len = 1 + channel_display.len() + 4; // @ + channel + " ❯ "
+        // "@channel ❯ " = @ (1) + channel + " ❯ " (3 visible chars)
+        let prefix_len = 1 + channel_display.len() + 3; // @ + channel + " ❯ "
 
         // Draw input or placeholder
         if input.is_empty() {
