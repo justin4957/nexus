@@ -439,13 +439,60 @@ async fn process_message(
             }
         }
 
-        // These will be implemented in Phase 2
-        ClientMessage::Input { .. }
-        | ClientMessage::InputTo { .. }
-        | ClientMessage::SwitchChannel { .. }
-        | ClientMessage::Resize { .. } => Some(create_error_message(
-            "Channel operations not yet implemented".to_string(),
-        )),
+        ClientMessage::Input { data } => {
+            let mut state_guard = state.write().await;
+            match state_guard.channel_manager.send_input(&data).await {
+                Ok(()) => None, // No response needed for input
+                Err(e) => Some(create_error_message(format!("Failed to send input: {}", e))),
+            }
+        }
+
+        ClientMessage::InputTo { channel, data } => {
+            let mut state_guard = state.write().await;
+            match state_guard
+                .channel_manager
+                .send_input_to(&channel, &data)
+                .await
+            {
+                Ok(()) => None, // No response needed for input
+                Err(e) => Some(create_error_message(format!(
+                    "Failed to send input to channel '{}': {}",
+                    channel, e
+                ))),
+            }
+        }
+
+        ClientMessage::SwitchChannel { name } => {
+            let mut state_guard = state.write().await;
+            match state_guard.channel_manager.switch_active(&name) {
+                Ok(()) => {
+                    drop(state_guard);
+                    let event =
+                        ServerMessage::Event(ChannelEvent::ActiveChanged { name: name.clone() });
+                    broadcast_to_clients(event, state).await;
+                    Some(ServerMessage::Ack {
+                        for_command: "SwitchChannel".to_string(),
+                    })
+                }
+                Err(e) => Some(create_error_message(format!(
+                    "Failed to switch channel: {}",
+                    e
+                ))),
+            }
+        }
+
+        ClientMessage::Resize { cols, rows } => {
+            let mut state_guard = state.write().await;
+            match state_guard.channel_manager.resize_all(cols, rows).await {
+                Ok(()) => Some(ServerMessage::Ack {
+                    for_command: "Resize".to_string(),
+                }),
+                Err(e) => Some(create_error_message(format!(
+                    "Failed to resize channels: {}",
+                    e
+                ))),
+            }
+        }
     }
 }
 

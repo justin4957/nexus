@@ -69,7 +69,7 @@ impl PtyChannel {
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
 
-        let command = config
+        let command_str = config
             .command
             .clone()
             .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
@@ -77,8 +77,29 @@ impl PtyChannel {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(Self::pty_size_from_config(&config))?;
 
-        let mut cmd = CommandBuilder::new(&command);
+        // Parse command string into executable and arguments
+        // Use shell to handle complex commands with pipes, redirects, etc.
+        let (executable, args) = if command_str.contains(' ')
+            || command_str.contains('|')
+            || command_str.contains('>')
+            || command_str.contains('<')
+            || command_str.contains('&')
+            || command_str.contains(';')
+        {
+            // Complex command - use shell to execute
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+            (shell, vec!["-c".to_string(), command_str.clone()])
+        } else {
+            // Simple command - execute directly
+            (command_str.clone(), vec![])
+        };
+
+        let mut cmd = CommandBuilder::new(&executable);
+        for arg in &args {
+            cmd.arg(arg);
+        }
         cmd.cwd(&working_dir);
+        let command = command_str;
 
         // Set TERM for proper terminal emulation
         cmd.env("TERM", "xterm-256color");
