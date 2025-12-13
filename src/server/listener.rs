@@ -291,10 +291,33 @@ async fn process_message(
                         .output_buffers
                         .entry(name.clone())
                         .or_insert_with(VecDeque::new);
+
+                    // Auto-subscribe the creating client to the new channel
+                    let subscription_event =
+                        if let Some(client) = state_guard.clients.get_mut(&client_id) {
+                            client.subscribe(std::slice::from_ref(&name));
+                            let subs = client.get_subscriptions();
+                            Some(ServerMessage::Event(ChannelEvent::SubscriptionChanged {
+                                subscribed: subs,
+                            }))
+                        } else {
+                            None
+                        };
+
                     let created_event =
                         ServerMessage::Event(ChannelEvent::Created { name: name.clone() });
                     drop(state_guard); // Release write lock before broadcasting
+
                     broadcast_to_clients(created_event, state).await;
+
+                    // Send subscription update to the creating client
+                    if let Some(sub_event) = subscription_event {
+                        let state_read = state.read().await;
+                        if let Some(client) = state_read.clients.get(&client_id) {
+                            let _ = client.send(sub_event).await;
+                        }
+                    }
+
                     Some(ServerMessage::Ack {
                         for_command: "CreateChannel".to_string(),
                     })
