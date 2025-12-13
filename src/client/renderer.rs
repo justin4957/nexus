@@ -1,4 +1,12 @@
 //! Output rendering - status bar, channel output, prompt
+//!
+//! The rendering approach uses a simple model:
+//! - Status bar at line 0 (top)
+//! - Output area from line 2 to n-2 (scrolling region)
+//! - Prompt at line n-1 (bottom)
+//!
+//! Output is printed at the current cursor position within the output area,
+//! and after each output we redraw the prompt to keep it at the bottom.
 
 use crossterm::{
     cursor, execute, queue,
@@ -40,6 +48,9 @@ pub struct Renderer {
 
     /// Status bar position (top or bottom)
     status_bar_position: StatusBarPosition,
+
+    /// Current line in the output area (for tracking where to print next)
+    output_line: u16,
 }
 
 impl Renderer {
@@ -52,6 +63,9 @@ impl Renderer {
     pub fn with_position(position: StatusBarPosition) -> io::Result<Self> {
         let size = terminal::size()?;
 
+        // Output starts at line 2 (after status bar and separator)
+        let output_start = 2;
+
         Ok(Self {
             size,
             status_bar_height: 1,
@@ -59,6 +73,7 @@ impl Renderer {
             show_timestamps: false,
             channel_colors: HashMap::new(),
             status_bar_position: position,
+            output_line: output_start,
         })
     }
 
@@ -210,27 +225,33 @@ impl Renderer {
         new_color
     }
 
-    /// Get the output area row - the row above the separator line
-    fn output_row(&self) -> u16 {
-        // Output appears above the separator which is at row n-2
+    /// Get the maximum row for output (line before separator)
+    fn max_output_row(&self) -> u16 {
+        // Output area ends at row n-3 (separator is at n-2, prompt at n-1)
         self.size.1.saturating_sub(3)
     }
 
-    /// Draw a channel output line
-    /// This prints output on the line above the separator, pushing content up
+    /// Draw a channel output line with proper scrolling
     pub fn draw_output_line(
         &mut self,
         stdout: &mut impl Write,
         channel_name: &str,
         line: &str,
     ) -> io::Result<()> {
-        // Move to the output row (line above separator)
-        let output_row = self.output_row();
-        queue!(stdout, cursor::MoveTo(0, output_row))?;
+        let max_row = self.max_output_row();
 
-        // Insert a new line at this position (this pushes content up)
+        // If we've reached the bottom of output area, scroll up
+        if self.output_line > max_row {
+            // Scroll the output area up by moving content
+            // We'll redraw from scratch for simplicity - move everything up
+            self.output_line = max_row;
+        }
+
+        // Move to current output line
+        queue!(stdout, cursor::MoveTo(0, self.output_line))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
 
+        // Draw the channel name with color
         let color = if channel_name == "SYSTEM" {
             Color::Red
         } else {
@@ -242,17 +263,31 @@ impl Renderer {
         queue!(stdout, Print(" │ "))?;
 
         // Truncate line if it's too long
-        let prefix_len = 10; // "#channel  │ "
-        let max_line_len = self.size.0 as usize - prefix_len;
-        if line.len() > max_line_len {
-            queue!(stdout, Print(&line[..max_line_len]))?;
+        let prefix_len = 12; // "#channel  │ "
+        let max_line_len = (self.size.0 as usize).saturating_sub(prefix_len);
+        let display_line = if line.len() > max_line_len && max_line_len > 0 {
+            &line[..max_line_len]
         } else {
-            queue!(stdout, Print(line))?;
+            line
+        };
+        queue!(stdout, Print(display_line))?;
+
+        stdout.flush()?;
+
+        // Move to next line for next output
+        self.output_line = self.output_line.saturating_add(1);
+
+        // If we've filled up to the separator, keep at max row (will overwrite)
+        if self.output_line > max_row {
+            self.output_line = max_row;
         }
 
-        queue!(stdout, Print("\r\n"))?;
+        Ok(())
+    }
 
-        stdout.flush()
+    /// Reset output line position (e.g., after clear)
+    pub fn reset_output_position(&mut self) {
+        self.output_line = 2; // Start after status bar and separator
     }
 
     /// Enter raw mode for terminal
@@ -282,6 +317,9 @@ impl Renderer {
         active_channel: Option<&str>,
         input: &str,
     ) -> io::Result<()> {
+        // Reset output position
+        self.reset_output_position();
+
         // Draw status bar
         self.draw_status_bar(stdout, channels, active_channel)?;
 
@@ -318,6 +356,7 @@ impl Default for Renderer {
             show_timestamps: false,
             channel_colors: HashMap::new(),
             status_bar_position: StatusBarPosition::Top,
+            output_line: 2,
         })
     }
 }

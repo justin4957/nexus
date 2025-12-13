@@ -273,16 +273,31 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                             }
                         }
 
-                        // Display if it's the active channel
-                        // TODO: Implement background output handling (maybe just status indicator)
-                        // For now, only print if active or maybe we print everything with channel prefix?
-                        // Renderer::draw_output_line prints with channel name.
-
+                        // Display output from subscribed channels
                         let text = String::from_utf8_lossy(&data);
 
-                        for line in text.lines() {
-                             renderer.draw_output_line(&mut std::io::stdout(), &channel, line)?;
+                        // Handle both complete lines and raw terminal output
+                        if text.is_empty() {
+                            continue;
                         }
+
+                        // Split by newlines but preserve empty trailing content
+                        let lines: Vec<&str> = text.split('\n').collect();
+                        for (i, line) in lines.iter().enumerate() {
+                            // Skip empty lines at the end from trailing newline
+                            if i == lines.len() - 1 && line.is_empty() {
+                                continue;
+                            }
+                            // Clean up carriage returns and other control chars
+                            let clean_line = line.trim_end_matches('\r');
+                            if !clean_line.is_empty() {
+                                renderer.draw_output_line(&mut std::io::stdout(), &channel, clean_line)?;
+                            }
+                        }
+
+                        // Redraw status bar and prompt after output
+                        renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
+                        renderer.draw_prompt(&mut std::io::stdout(), active_channel.as_deref(), &input_buffer)?;
                     }
                     ServerMessage::ChannelList { channels: list } => {
                         let active_from_server = list
