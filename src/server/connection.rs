@@ -4,6 +4,7 @@ use crate::protocol::{
     deserialize, frame_message, serialize, ClientMessage, ServerMessage, PROTOCOL_VERSION,
 };
 use anyhow::{anyhow, Result};
+use std::collections::HashSet;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::mpsc;
@@ -18,7 +19,7 @@ pub struct ClientConnection {
     sender: mpsc::Sender<ServerMessage>,
 
     /// Channels this client is subscribed to
-    subscriptions: Vec<String>,
+    subscriptions: HashSet<String>,
 }
 
 impl ClientConnection {
@@ -27,7 +28,7 @@ impl ClientConnection {
         Self {
             id: Uuid::new_v4(),
             sender,
-            subscriptions: Vec::new(),
+            subscriptions: HashSet::new(),
         }
     }
 
@@ -46,26 +47,26 @@ impl ClientConnection {
 
     /// Subscribe to channels
     pub fn subscribe(&mut self, channels: &[String]) {
-        for channel in channels {
-            if !self.subscriptions.contains(channel) {
-                self.subscriptions.push(channel.clone());
-            }
-        }
+        self.subscriptions.extend(channels.iter().cloned());
     }
 
     /// Unsubscribe from channels
     pub fn unsubscribe(&mut self, channels: &[String]) {
-        self.subscriptions.retain(|c| !channels.contains(c));
+        for channel in channels {
+            self.subscriptions.remove(channel);
+        }
     }
 
     /// Check if subscribed to a channel
     pub fn is_subscribed(&self, channel: &str) -> bool {
-        self.subscriptions.iter().any(|c| c == channel)
+        self.subscriptions.contains(channel)
     }
 
     /// Get a list of current subscriptions
     pub fn get_subscriptions(&self) -> Vec<String> {
-        self.subscriptions.clone()
+        let mut subs: Vec<_> = self.subscriptions.iter().cloned().collect();
+        subs.sort();
+        subs
     }
 }
 

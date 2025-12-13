@@ -10,7 +10,7 @@ use crate::{
     protocol::{ChannelEvent, ClientMessage, ServerMessage, PROTOCOL_VERSION},
 };
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
@@ -155,12 +155,15 @@ async fn handle_client(stream: UnixStream, state: Arc<RwLock<ServerState>>) -> R
 
     tracing::info!("Client connected: {}", client_id);
 
-    // New clients subscribe to all existing channels by default.
-    // This ensures they see all output from the start.
+    // New clients subscribe to the active channel (if any) by default to avoid overwhelming output.
     let (session_id, initial_channels) = {
         let state_guard = state.read().await;
-        let channel_names = state_guard.channel_manager.list_channels();
-        (state_guard.session.id(), channel_names)
+        let initial = state_guard
+            .channel_manager
+            .active_channel()
+            .map(|name| vec![name.to_string()])
+            .unwrap_or_default();
+        (state_guard.session.id(), initial)
     };
     client.subscribe(&initial_channels);
 
@@ -301,16 +304,15 @@ async fn process_message(
         ClientMessage::ListChannels => {
             let state_guard = state.read().await;
             let client = state_guard.clients.get(&client_id).unwrap();
-            let active_channel = state_guard.channel_manager.active_channel();
             let infos = state_guard
                 .channel_manager
                 .list_channels_info()
                 .into_iter()
-                .map(|(name, running)| crate::protocol::ChannelInfo {
-                    is_subscribed: client.is_subscribed(&name),
-                    is_active: active_channel == Some(&name),
-                    name,
-                    running,
+                .map(|info| crate::protocol::ChannelInfo {
+                    is_subscribed: client.is_subscribed(&info.name),
+                    is_active: info.is_active,
+                    name: info.name,
+                    running: info.running,
                 })
                 .collect();
             Some(ServerMessage::ChannelList { channels: infos })
@@ -338,49 +340,53 @@ async fn process_message(
         }
 
         ClientMessage::Subscribe { channels } => {
-            let state_clone = Arc::clone(state);
-            tokio::spawn(async move {
-                let all_channels = if channels.contains(&"*".to_string()) {
-                    let state_read = state_clone.read().await;
-                    state_read.channel_manager.list_channels()
-                } else {
-                    channels
-                };
+            let mut state_guard = state.write().await;
+            let known_channels: HashSet<_> = state_guard
+                .channel_manager
+                .list_channels()
+                .into_iter()
+                .collect();
 
-                let mut state_guard = state_clone.write().await;
-                if let Some(client) = state_guard.clients.get_mut(&client_id) {
-                    client.subscribe(&all_channels);
-                    let subs = client.get_subscriptions();
-                    let event = ServerMessage::Event(ChannelEvent::SubscriptionChanged {
-                        subscribed: subs,
-                    });
-
-                    if let Err(e) = client.send(event).await {
-                        tracing::warn!("Failed to send subscription change event: {}", e);
+            let mut target_channels = Vec::new();
+            if channels.iter().any(|c| c == "*") {
+                target_channels.extend(known_channels.iter().cloned());
+            } else {
+                for channel in channels {
+                    if known_channels.contains(&channel) {
+                        target_channels.push(channel);
+                    } else {
+                        tracing::warn!(
+                            "Client {} attempted to subscribe to unknown channel '{}'",
+                            client_id,
+                            channel
+                        );
                     }
                 }
-            });
-            None // No direct response, client gets an event
+            }
+
+            if let Some(client) = state_guard.clients.get_mut(&client_id) {
+                client.subscribe(&target_channels);
+                let subs = client.get_subscriptions();
+                Some(ServerMessage::Event(ChannelEvent::SubscriptionChanged {
+                    subscribed: subs,
+                }))
+            } else {
+                Some(create_error_message("Client not found".to_string()))
+            }
         }
 
         ClientMessage::Unsubscribe { channels } => {
-            let state_clone = Arc::clone(state);
-            tokio::spawn(async move {
-                let mut state_guard = state_clone.write().await;
-                if let Some(client) = state_guard.clients.get_mut(&client_id) {
-                    client.unsubscribe(&channels);
+            let mut state_guard = state.write().await;
+            if let Some(client) = state_guard.clients.get_mut(&client_id) {
+                client.unsubscribe(&channels);
 
-                    let subs = client.get_subscriptions();
-                    let event = ServerMessage::Event(ChannelEvent::SubscriptionChanged {
-                        subscribed: subs,
-                    });
-
-                    if let Err(e) = client.send(event).await {
-                        tracing::warn!("Failed to send subscription change event: {}", e);
-                    }
-                }
-            });
-            None // No direct response, client gets an event
+                let subs = client.get_subscriptions();
+                Some(ServerMessage::Event(ChannelEvent::SubscriptionChanged {
+                    subscribed: subs,
+                }))
+            } else {
+                Some(create_error_message("Client not found".to_string()))
+            }
         }
 
         // These will be implemented in Phase 2
@@ -418,6 +424,7 @@ async fn handle_channel_event(event: ChannelManagerEvent, state: &Arc<RwLock<Ser
             };
 
             let state_read = state.read().await;
+            // TODO: Maintain a subscription index to avoid scanning all clients on every output event.
             for client in state_read.clients.values() {
                 if client.is_subscribed(&channel_name) {
                     if let Err(e) = client.send(msg.clone()).await {
@@ -430,6 +437,40 @@ async fn handle_channel_event(event: ChannelManagerEvent, state: &Arc<RwLock<Ser
             channel_name,
             state: channel_state,
         } => {
+            let mut subscription_updates = Vec::new();
+            if matches!(
+                channel_state,
+                crate::channel::ChannelState::Killed | crate::channel::ChannelState::Exited(_)
+            ) {
+                let mut state_guard = state.write().await;
+                for (client_id, client) in state_guard.clients.iter_mut() {
+                    if client.is_subscribed(&channel_name) {
+                        client.unsubscribe(&[channel_name.clone()]);
+                        subscription_updates.push((*client_id, client.get_subscriptions()));
+                    }
+                }
+            }
+
+            if !subscription_updates.is_empty() {
+                let state_read = state.read().await;
+                for (client_id, subs) in subscription_updates {
+                    if let Some(client) = state_read.clients.get(&client_id) {
+                        if let Err(e) = client
+                            .send(ServerMessage::Event(ChannelEvent::SubscriptionChanged {
+                                subscribed: subs.clone(),
+                            }))
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to notify client {} of subscription update: {}",
+                                client_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
             let server_event = match channel_state {
                 // We broadcast Created events from the message handler to get an Ack.
                 crate::channel::ChannelState::Running => None,

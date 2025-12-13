@@ -7,7 +7,7 @@ use crossterm::{
 };
 use std::io::{self, Write};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const CHANNEL_COLORS: [Color; 6] = [
     Color::Blue,
@@ -116,14 +116,24 @@ impl Renderer {
         stdout.flush()
     }
 
+    /// Remove the cached color for a channel so the slot can be reused.
+    pub fn clear_channel_color(&mut self, channel_name: &str) {
+        self.channel_colors.remove(channel_name);
+    }
+
     /// Get a color for a channel, assigning a new one if necessary
     fn get_channel_color(&mut self, channel_name: &str) -> Color {
         if let Some(color) = self.channel_colors.get(channel_name) {
             return *color;
         }
 
-        let next_color_index = self.channel_colors.len() % CHANNEL_COLORS.len();
-        let new_color = CHANNEL_COLORS[next_color_index];
+        let used_colors: HashSet<_> = self.channel_colors.values().copied().collect();
+        let new_color = CHANNEL_COLORS
+            .iter()
+            .find(|c| !used_colors.contains(c))
+            .copied()
+            .unwrap_or(CHANNEL_COLORS[self.channel_colors.len() % CHANNEL_COLORS.len()]);
+
         self.channel_colors
             .insert(channel_name.to_string(), new_color);
         new_color

@@ -5,6 +5,14 @@ use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
+/// Lightweight channel listing item used by the server when returning channel info.
+#[derive(Debug, Clone)]
+pub struct ChannelListItem {
+    pub name: String,
+    pub running: bool,
+    pub is_active: bool,
+}
+
 /// Event emitted by channels
 #[derive(Debug, Clone)]
 pub enum ChannelManagerEvent {
@@ -166,10 +174,15 @@ impl ChannelManager {
     }
 
     /// List detailed info for all channels
-    pub fn list_channels_info(&self) -> Vec<(String, bool)> {
+    pub fn list_channels_info(&self) -> Vec<ChannelListItem> {
+        let active = self.active_channel().map(|name| name.to_string());
         self.channels
             .values()
-            .map(|c| (c.name().to_string(), c.state().is_alive()))
+            .map(|c| ChannelListItem {
+                name: c.name().to_string(),
+                running: c.state().is_alive(),
+                is_active: active.as_deref() == Some(c.name()),
+            })
             .collect()
     }
 
