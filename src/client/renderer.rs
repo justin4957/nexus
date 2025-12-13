@@ -44,6 +44,13 @@ const CHANNEL_COLORS: [Color; 6] = [
     Color::Red,
 ];
 
+/// A single line of output with its channel name
+#[derive(Clone)]
+struct OutputLine {
+    channel: String,
+    content: String,
+}
+
 /// Terminal renderer for nexus client
 pub struct Renderer {
     /// Terminal size (cols, rows)
@@ -65,8 +72,11 @@ pub struct Renderer {
     /// Status bar position (top or bottom)
     status_bar_position: StatusBarPosition,
 
-    /// Current line in the output area (for tracking where to print next)
-    output_line: u16,
+    /// Buffer of output lines for scrolling
+    output_buffer: Vec<OutputLine>,
+
+    /// Maximum lines to keep in buffer (for memory management)
+    max_buffer_lines: usize,
 }
 
 impl Renderer {
@@ -79,9 +89,6 @@ impl Renderer {
     pub fn with_position(position: StatusBarPosition) -> io::Result<Self> {
         let size = terminal::size()?;
 
-        // Output starts at line 2 (after status bar and separator)
-        let output_start = 2;
-
         Ok(Self {
             size,
             status_bar_height: 1,
@@ -89,7 +96,8 @@ impl Renderer {
             show_timestamps: false,
             channel_colors: HashMap::new(),
             status_bar_position: position,
-            output_line: output_start,
+            output_buffer: Vec::new(),
+            max_buffer_lines: 10000, // Keep up to 10k lines in memory
         })
     }
 
@@ -241,30 +249,27 @@ impl Renderer {
         new_color
     }
 
-    /// Get the maximum row for output (line before separator)
-    fn max_output_row(&self) -> u16 {
-        // Output area ends at row n-3 (separator is at n-2, prompt at n-1)
-        self.size.1.saturating_sub(3)
+    /// Get the number of visible output rows
+    fn visible_output_rows(&self) -> usize {
+        // Output area: from row 2 to row n-3 (inclusive)
+        // Row 0: status bar, Row 1: separator, Row n-2: separator, Row n-1: prompt
+        self.size.1.saturating_sub(4) as usize
     }
 
-    /// Draw a channel output line with proper scrolling
-    pub fn draw_output_line(
+    /// Get the starting row for output area
+    fn output_start_row(&self) -> u16 {
+        2 // After status bar (row 0) and separator (row 1)
+    }
+
+    /// Draw a single output line at a specific row
+    fn draw_line_at_row(
         &mut self,
         stdout: &mut impl Write,
+        row: u16,
         channel_name: &str,
-        line: &str,
+        content: &str,
     ) -> io::Result<()> {
-        let max_row = self.max_output_row();
-
-        // If we've reached the bottom of output area, scroll up
-        if self.output_line > max_row {
-            // Scroll the output area up by moving content
-            // We'll redraw from scratch for simplicity - move everything up
-            self.output_line = max_row;
-        }
-
-        // Move to current output line
-        queue!(stdout, cursor::MoveTo(0, self.output_line))?;
+        queue!(stdout, cursor::MoveTo(0, row))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
 
         // Draw the channel name with color
@@ -281,29 +286,78 @@ impl Renderer {
         // Truncate line if it's too long
         let prefix_len = 12; // "#channel  │ "
         let max_line_len = (self.size.0 as usize).saturating_sub(prefix_len);
-        let display_line = if line.len() > max_line_len && max_line_len > 0 {
-            &line[..max_line_len]
+        let display_line = if content.len() > max_line_len && max_line_len > 0 {
+            &content[..max_line_len]
         } else {
-            line
+            content
         };
         queue!(stdout, Print(display_line))?;
 
-        stdout.flush()?;
+        Ok(())
+    }
 
-        // Move to next line for next output
-        self.output_line = self.output_line.saturating_add(1);
+    /// Redraw all visible output lines from the buffer
+    fn redraw_output_area(&mut self, stdout: &mut impl Write) -> io::Result<()> {
+        let visible_rows = self.visible_output_rows();
+        let start_row = self.output_start_row();
 
-        // If we've filled up to the separator, keep at max row (will overwrite)
-        if self.output_line > max_row {
-            self.output_line = max_row;
+        // Calculate which lines from buffer to show (most recent ones)
+        let buffer_len = self.output_buffer.len();
+        let skip_count = buffer_len.saturating_sub(visible_rows);
+
+        // Clone the visible lines to avoid borrow issues
+        let visible_lines: Vec<OutputLine> = self
+            .output_buffer
+            .iter()
+            .skip(skip_count)
+            .cloned()
+            .collect();
+
+        // Clear and redraw each row in the output area
+        for (i, line) in visible_lines.iter().enumerate() {
+            let row = start_row + i as u16;
+            self.draw_line_at_row(stdout, row, &line.channel, &line.content)?;
+        }
+
+        // Clear any remaining rows (if buffer has fewer lines than visible area)
+        let lines_drawn = visible_lines.len();
+        for i in lines_drawn..visible_rows {
+            let row = start_row + i as u16;
+            queue!(stdout, cursor::MoveTo(0, row))?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
         }
 
         Ok(())
     }
 
-    /// Reset output line position (e.g., after clear)
-    pub fn reset_output_position(&mut self) {
-        self.output_line = 2; // Start after status bar and separator
+    /// Draw a channel output line with proper scrolling
+    pub fn draw_output_line(
+        &mut self,
+        stdout: &mut impl Write,
+        channel_name: &str,
+        line: &str,
+    ) -> io::Result<()> {
+        // Add line to buffer
+        self.output_buffer.push(OutputLine {
+            channel: channel_name.to_string(),
+            content: line.to_string(),
+        });
+
+        // Trim buffer if it exceeds max size
+        if self.output_buffer.len() > self.max_buffer_lines {
+            let excess = self.output_buffer.len() - self.max_buffer_lines;
+            self.output_buffer.drain(0..excess);
+        }
+
+        // Redraw the entire output area with scrolling
+        self.redraw_output_area(stdout)?;
+
+        stdout.flush()
+    }
+
+    /// Clear the output buffer (e.g., for :clear command)
+    pub fn clear_output_buffer(&mut self) {
+        self.output_buffer.clear();
     }
 
     /// Enter raw mode for terminal
@@ -333,11 +387,11 @@ impl Renderer {
         active_channel: Option<&str>,
         input: &str,
     ) -> io::Result<()> {
-        // Reset output position
-        self.reset_output_position();
-
         // Draw status bar
         self.draw_status_bar(stdout, channels, active_channel)?;
+
+        // Redraw output area from buffer
+        self.redraw_output_area(stdout)?;
 
         // Draw separator line below status bar (if top position)
         if matches!(self.status_bar_position, StatusBarPosition::Top) {
@@ -372,7 +426,8 @@ impl Default for Renderer {
             show_timestamps: false,
             channel_colors: HashMap::new(),
             status_bar_position: StatusBarPosition::Top,
-            output_line: 2,
+            output_buffer: Vec::new(),
+            max_buffer_lines: 10000,
         })
     }
 }
