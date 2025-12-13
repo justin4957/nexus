@@ -94,6 +94,102 @@ echo "in server"
 # Verify output now appears
 ```
 
+### 5. Control Command Testing
+
+Test the control commands (prefixed with `:`) implemented in Phase 2.4:
+
+**Channel creation (`:new`):**
+```bash
+# Start nexus
+cargo run -- new test-session
+
+# Create channel with default shell
+:new shell
+# Expected: Creates channel named "shell" with default shell
+
+# Create channel with specific command
+:new build cargo build
+# Expected: Creates channel running "cargo build"
+
+# Verify channels exist
+:list
+# Expected: Shows "shell" and "build" channels
+```
+
+**Channel listing (`:list`):**
+```bash
+:list
+# Expected: Shows all channels with their running status
+```
+
+**Channel status (`:status`):**
+```bash
+# Show all channel statuses
+:status
+# Expected: Shows status for all channels (name, pid, running state, exit code)
+
+# Show specific channel status
+:status shell
+# Expected: Shows status only for "shell" channel
+```
+
+**Subscription management (`:sub`, `:unsub`, `:subs`):**
+```bash
+# Subscribe to specific channels
+:sub shell build
+# Expected: "Subscriptions updated: shell, build"
+
+# Check current subscriptions
+:subs
+# Expected: "Current subscriptions: shell, build"
+
+# Subscribe to all channels
+:sub *
+# Expected: Subscribes to all existing channels
+
+# Unsubscribe from channels
+:unsub shell
+# Expected: "Subscriptions updated: build"
+
+# Usage help when no args
+:sub
+# Expected: Shows usage and current subscriptions
+```
+
+**Channel termination (`:kill`):**
+```bash
+:kill build
+# Expected: Terminates "build" channel
+:list
+# Expected: Shows "build" as stopped or removed
+```
+
+**Screen clear (`:clear`):**
+```bash
+:clear
+# Expected: Clears output buffer, redraws status bar and prompt
+```
+
+**Exit (`:quit` or `:exit`):**
+```bash
+:quit
+# Expected: Exits nexus client (Ctrl+\ also works)
+```
+
+**Error handling:**
+```bash
+# Invalid command
+:invalid
+# Expected: "Unknown command: invalid"
+
+# Missing required argument
+:new
+# Expected: "Usage: :new <name> [command]"
+
+:kill
+# Expected: "Usage: :kill <name>"
+```
+
 ## Test Utilities
 
 ### Mock PTY
