@@ -336,6 +336,37 @@ prev_channel = "ctrl+p"
 └─────────────────────────────────────────┘
 ```
 
+## Troubleshooting
+
+### Kill stale server processes
+
+If nexus isn't responding or you're seeing connection errors, kill any stale server processes and socket files:
+
+```bash
+# Kill all nexus server processes and remove stale sockets
+pkill -9 -f nexus-server
+rm -rf /var/folders/*/*/T/nexus/*.sock    # macOS
+rm -rf /tmp/nexus/*.sock                   # Linux
+```
+
+### Check for running processes
+
+```bash
+ps aux | grep nexus
+```
+
+### List active sessions
+
+```bash
+nexus list
+```
+
+### Force kill a specific session
+
+```bash
+nexus kill <session-name>
+```
+
 ## Development Status
 
 See [ROADMAP.md](./ROADMAP.md) for development phases and progress.
