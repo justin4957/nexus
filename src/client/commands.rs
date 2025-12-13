@@ -138,6 +138,85 @@ pub async fn handle_control_command(
                 input_buffer,
             )?;
         }
+        "help" | "?" => {
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "nexus - channel-based terminal multiplexer",
+            )?;
+            renderer.draw_output_line(&mut stdout, "SYSTEM", "")?;
+            renderer.draw_output_line(&mut stdout, "SYSTEM", "Commands:")?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  :new <name> [cmd]   Create a new channel (optionally with a command)",
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  :kill <name>        Kill a channel",
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  :list               List all channels",
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  :status [name]      Show channel status",
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  :sub <ch> [ch...]   Subscribe to channel output (:sub * for all)",
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  :unsub <ch>         Unsubscribe from channel",
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  :subs               Show current subscriptions",
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  :clear              Clear the output area",
+            )?;
+            renderer.draw_output_line(&mut stdout, "SYSTEM", "  :quit               Exit nexus")?;
+            renderer.draw_output_line(&mut stdout, "SYSTEM", "")?;
+            renderer.draw_output_line(&mut stdout, "SYSTEM", "Channel switching:")?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  #<name>             Switch to channel by name",
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  #<name> <cmd>       Send command to channel without switching",
+            )?;
+            renderer.draw_output_line(&mut stdout, "SYSTEM", "")?;
+            renderer.draw_output_line(&mut stdout, "SYSTEM", "Keyboard shortcuts:")?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Ctrl+C              Cancel current input / send interrupt to channel",
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Ctrl+D              Send EOF to channel",
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Ctrl+\\              Exit nexus immediately",
+            )?;
+        }
         "quit" | "exit" => return Ok(CommandResult::Exit),
         _ => {
             renderer.draw_output_line(

@@ -51,6 +51,28 @@ struct OutputLine {
     content: String,
 }
 
+/// Welcome tips shown on first launch
+const WELCOME_TIPS: &[&str] = &[
+    "Welcome to nexus - channel-based terminal multiplexer",
+    "",
+    "Quick start:",
+    "  :new <name> [cmd]  Create a new channel (optionally with a command)",
+    "  #<name>            Switch to channel by name",
+    "  :list              List all channels",
+    "  :sub *             Subscribe to all channel output",
+    "  :clear             Clear the output area",
+    "  :quit              Exit nexus (Ctrl+\\ also works)",
+    "",
+    "Channels:",
+    "  [#channel]         Normal channel (gray)",
+    "  [#channel*]        Channel with new output (yellow)",
+    "  [#channel]         Active channel (green)",
+    "  [#channel: ✓]      Exited successfully (dark green)",
+    "  [#channel: ✗]      Exited with error (dark red)",
+    "",
+    "Type a command to get started, or :new shell to create a shell channel.",
+];
+
 /// Terminal renderer for nexus client
 pub struct Renderer {
     /// Terminal size (cols, rows)
@@ -77,6 +99,9 @@ pub struct Renderer {
 
     /// Maximum lines to keep in buffer (for memory management)
     max_buffer_lines: usize,
+
+    /// Whether to show welcome tips (hidden once output appears)
+    show_welcome: bool,
 }
 
 impl Renderer {
@@ -98,6 +123,7 @@ impl Renderer {
             status_bar_position: position,
             output_buffer: Vec::new(),
             max_buffer_lines: 10000, // Keep up to 10k lines in memory
+            show_welcome: true,
         })
     }
 
@@ -206,7 +232,7 @@ impl Renderer {
         stdout.flush()
     }
 
-    /// Draw the prompt line
+    /// Draw the prompt line with enhanced visuals
     pub fn draw_prompt(
         &self,
         stdout: &mut impl Write,
@@ -217,11 +243,28 @@ impl Renderer {
         queue!(stdout, cursor::MoveTo(0, prompt_row))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
 
+        // Draw left border
+        queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+        queue!(stdout, Print("│ "))?;
+
+        // Draw channel name with color
         let channel_display = active_channel.unwrap_or("none");
         queue!(stdout, SetForegroundColor(Color::Cyan))?;
         queue!(stdout, Print(format!("@{}", channel_display)))?;
+
+        // Draw prompt arrow
+        queue!(stdout, SetForegroundColor(Color::Green))?;
+        queue!(stdout, Print(" ❯ "))?;
         queue!(stdout, ResetColor)?;
-        queue!(stdout, Print(format!(" > {}", input)))?;
+
+        // Draw input or placeholder
+        if input.is_empty() {
+            queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+            queue!(stdout, Print("Type :help for commands"))?;
+            queue!(stdout, ResetColor)?;
+        } else {
+            queue!(stdout, Print(input))?;
+        }
 
         stdout.flush()
     }
@@ -296,8 +339,75 @@ impl Renderer {
         Ok(())
     }
 
+    /// Draw welcome tips in the output area
+    fn draw_welcome_tips(&self, stdout: &mut impl Write) -> io::Result<()> {
+        let visible_rows = self.visible_output_rows();
+        let start_row = self.output_start_row();
+
+        // Center the welcome tips vertically if there's enough space
+        let tips_height = WELCOME_TIPS.len();
+        let vertical_offset = if visible_rows > tips_height {
+            (visible_rows - tips_height) / 2
+        } else {
+            0
+        };
+
+        // Clear all output rows first
+        for i in 0..visible_rows {
+            let row = start_row + i as u16;
+            queue!(stdout, cursor::MoveTo(0, row))?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+        }
+
+        // Draw tips with color
+        for (i, tip) in WELCOME_TIPS.iter().enumerate() {
+            if i >= visible_rows {
+                break;
+            }
+            let row = start_row + (vertical_offset + i) as u16;
+            if row >= start_row + visible_rows as u16 {
+                break;
+            }
+
+            queue!(stdout, cursor::MoveTo(2, row))?;
+
+            // Color the header line differently
+            if i == 0 {
+                queue!(stdout, SetForegroundColor(Color::Cyan))?;
+                queue!(stdout, Print(tip))?;
+                queue!(stdout, ResetColor)?;
+            } else if tip.starts_with("  :") || tip.starts_with("  #") || tip.starts_with("  [") {
+                // Command hints - use green for commands
+                let parts: Vec<&str> = tip.splitn(2, "  ").collect();
+                if parts.len() == 2 {
+                    queue!(stdout, SetForegroundColor(Color::Green))?;
+                    queue!(stdout, Print(format!("  {}", parts[0].trim())))?;
+                    queue!(stdout, ResetColor)?;
+                    queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+                    queue!(stdout, Print(format!("  {}", parts[1])))?;
+                    queue!(stdout, ResetColor)?;
+                } else {
+                    queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+                    queue!(stdout, Print(tip))?;
+                    queue!(stdout, ResetColor)?;
+                }
+            } else {
+                queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+                queue!(stdout, Print(tip))?;
+                queue!(stdout, ResetColor)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Redraw all visible output lines from the buffer
     fn redraw_output_area(&mut self, stdout: &mut impl Write) -> io::Result<()> {
+        // Show welcome tips if buffer is empty and welcome is enabled
+        if self.output_buffer.is_empty() && self.show_welcome {
+            return self.draw_welcome_tips(stdout);
+        }
+
         let visible_rows = self.visible_output_rows();
         let start_row = self.output_start_row();
 
@@ -337,6 +447,9 @@ impl Renderer {
         channel_name: &str,
         line: &str,
     ) -> io::Result<()> {
+        // Hide welcome tips once we have actual output
+        self.show_welcome = false;
+
         // Add line to buffer
         self.output_buffer.push(OutputLine {
             channel: channel_name.to_string(),
@@ -428,6 +541,7 @@ impl Default for Renderer {
             status_bar_position: StatusBarPosition::Top,
             output_buffer: Vec::new(),
             max_buffer_lines: 10000,
+            show_welcome: true,
         })
     }
 }
