@@ -6,7 +6,7 @@ mod renderer;
 
 use crate::client::commands::{handle_control_command, CommandResult};
 use crate::client::input::{parse_input, ParsedInput};
-use crate::client::renderer::{strip_ansi_codes, ChannelStatusInfo, Renderer};
+use crate::client::renderer::{ChannelStatusInfo, Renderer};
 use crate::config::Config;
 use crate::protocol::{ChannelEvent, ClientMessage, ServerMessage};
 use crate::server::connection::{read_message, write_message};
@@ -18,6 +18,261 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+
+/// Command history for input recall
+struct CommandHistory {
+    /// History entries (oldest first)
+    entries: Vec<String>,
+    /// Current position in history (None = not browsing history)
+    position: Option<usize>,
+    /// Maximum entries to keep
+    max_entries: usize,
+    /// Saved current input when browsing history
+    saved_input: String,
+}
+
+impl CommandHistory {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            position: None,
+            max_entries,
+            saved_input: String::new(),
+        }
+    }
+
+    /// Add a command to history (only if non-empty and different from last)
+    fn add(&mut self, command: &str) {
+        if command.is_empty() {
+            return;
+        }
+        // Don't add duplicates of the last entry
+        if self.entries.last().map(|s| s.as_str()) == Some(command) {
+            return;
+        }
+        self.entries.push(command.to_string());
+        if self.entries.len() > self.max_entries {
+            self.entries.remove(0);
+        }
+        self.position = None;
+        self.saved_input.clear();
+    }
+
+    /// Move up in history (older), returning the command to display
+    fn up(&mut self, current_input: &str) -> Option<&str> {
+        if self.entries.is_empty() {
+            return None;
+        }
+
+        let new_pos = match self.position {
+            None => {
+                // Save current input before browsing
+                self.saved_input = current_input.to_string();
+                self.entries.len().saturating_sub(1)
+            }
+            Some(0) => 0, // Already at oldest
+            Some(pos) => pos - 1,
+        };
+
+        self.position = Some(new_pos);
+        self.entries.get(new_pos).map(|s| s.as_str())
+    }
+
+    /// Move down in history (newer), returning the command to display
+    fn down(&mut self) -> Option<&str> {
+        match self.position {
+            None => None,
+            Some(pos) => {
+                if pos + 1 >= self.entries.len() {
+                    // Return to current input
+                    self.position = None;
+                    Some(self.saved_input.as_str())
+                } else {
+                    self.position = Some(pos + 1);
+                    self.entries.get(pos + 1).map(|s| s.as_str())
+                }
+            }
+        }
+    }
+
+    /// Reset history browsing state
+    fn reset_position(&mut self) {
+        self.position = None;
+        self.saved_input.clear();
+    }
+}
+
+/// Input line editor with cursor position tracking
+struct LineEditor {
+    /// The input buffer
+    buffer: String,
+    /// Cursor position (byte index)
+    cursor: usize,
+}
+
+impl LineEditor {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            cursor: 0,
+        }
+    }
+
+    /// Get the current buffer content
+    fn content(&self) -> &str {
+        &self.buffer
+    }
+
+    /// Get cursor position
+    fn cursor_position(&self) -> usize {
+        self.cursor
+    }
+
+    /// Check if buffer is empty
+    fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Insert a character at cursor position
+    fn insert(&mut self, c: char) {
+        self.buffer.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    /// Delete character before cursor (backspace)
+    fn backspace(&mut self) -> bool {
+        if self.cursor > 0 {
+            // Find the previous character boundary
+            let prev_cursor = self.buffer[..self.cursor]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.buffer.remove(prev_cursor);
+            self.cursor = prev_cursor;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Delete character at cursor (delete key)
+    fn delete(&mut self) -> bool {
+        if self.cursor < self.buffer.len() {
+            self.buffer.remove(self.cursor);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move cursor left by one character
+    fn move_left(&mut self) -> bool {
+        if self.cursor > 0 {
+            self.cursor = self.buffer[..self.cursor]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move cursor right by one character
+    fn move_right(&mut self) -> bool {
+        if self.cursor < self.buffer.len() {
+            self.cursor = self.buffer[self.cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.cursor + i)
+                .unwrap_or(self.buffer.len());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move cursor to start of line
+    fn move_home(&mut self) -> bool {
+        if self.cursor > 0 {
+            self.cursor = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move cursor to end of line
+    fn move_end(&mut self) -> bool {
+        if self.cursor < self.buffer.len() {
+            self.cursor = self.buffer.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Delete word backward (Ctrl+W)
+    fn delete_word_backward(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+
+        // Find start of previous word
+        let before_cursor = &self.buffer[..self.cursor];
+        let trimmed_end = before_cursor.trim_end();
+        let word_start = trimmed_end
+            .rfind(|c: char| c.is_whitespace())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        self.buffer.drain(word_start..self.cursor);
+        self.cursor = word_start;
+        true
+    }
+
+    /// Delete to end of line (Ctrl+K)
+    fn delete_to_end(&mut self) -> bool {
+        if self.cursor < self.buffer.len() {
+            self.buffer.truncate(self.cursor);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Delete to start of line (Ctrl+U)
+    fn delete_to_start(&mut self) -> bool {
+        if self.cursor > 0 {
+            self.buffer.drain(..self.cursor);
+            self.cursor = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear the buffer and reset cursor
+    fn clear(&mut self) {
+        self.buffer.clear();
+        self.cursor = 0;
+    }
+
+    /// Set the buffer content (e.g., from history)
+    fn set(&mut self, content: &str) {
+        self.buffer = content.to_string();
+        self.cursor = self.buffer.len();
+    }
+
+    /// Take the buffer content and clear
+    fn take(&mut self) -> String {
+        let content = std::mem::take(&mut self.buffer);
+        self.cursor = 0;
+        content
+    }
+}
 
 /// Start a new session (spawns server if needed)
 pub async fn start_new_session(name: &str) -> Result<()> {
@@ -250,7 +505,8 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     msg_tx.send(ClientMessage::ListChannels).await?;
 
     // State
-    let mut input_buffer = String::new();
+    let mut line_editor = LineEditor::new();
+    let mut history: HashMap<String, CommandHistory> = HashMap::new();
     let mut channels: Vec<ChannelStatusInfo> = Vec::new();
     let mut active_channel: Option<String> = None;
     let mut subscriptions: Vec<String> = Vec::new();
@@ -258,13 +514,23 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     // Buffer for partial lines (output without trailing newline) per channel
     let mut line_buffers: HashMap<String, String> = HashMap::new();
 
+    // Send initial resize to server
+    let (initial_cols, initial_rows) = renderer.terminal_size();
+    msg_tx
+        .send(ClientMessage::Resize {
+            cols: initial_cols,
+            rows: initial_rows,
+        })
+        .await?;
+
     // Redraw initially with full UI layout
     Renderer::clear(&mut std::io::stdout())?;
     renderer.draw_full_ui(
         &mut std::io::stdout(),
         &channels,
         active_channel.as_deref(),
-        &input_buffer,
+        line_editor.content(),
+        line_editor.cursor_position(),
     )?;
 
     // Main loop
@@ -311,9 +577,8 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                             }
                         }
 
-                        // Convert to string and strip ANSI escape codes
-                        let raw_text = String::from_utf8_lossy(&data);
-                        let text = strip_ansi_codes(&raw_text);
+                        // Convert to string preserving ANSI escape codes
+                        let text = String::from_utf8_lossy(&data);
 
                         if text.is_empty() {
                             continue;
@@ -331,11 +596,13 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                             let line = buffer[..newline_pos].to_string();
                             *buffer = buffer[newline_pos + 1..].to_string();
 
-                            // Clean up the line
+                            // Clean up the line (remove carriage returns)
                             let clean_line = line.trim_end_matches('\r');
 
                             // Skip empty lines and lines that are just whitespace
-                            if clean_line.trim().is_empty() {
+                            // Note: We check the visible content, not ANSI codes
+                            let visible_content = renderer::strip_ansi_codes(clean_line);
+                            if visible_content.trim().is_empty() {
                                 continue;
                             }
 
@@ -344,7 +611,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
 
                         // Redraw status bar and prompt after output
                         renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
-                        renderer.draw_prompt(&mut std::io::stdout(), active_channel.as_deref(), &input_buffer)?;
+                        renderer.draw_prompt(&mut std::io::stdout(), active_channel.as_deref(), line_editor.content(), line_editor.cursor_position())?;
                     }
                     ServerMessage::ChannelList { channels: list } => {
                         let active_from_server = list
@@ -441,120 +708,220 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                 }
 
                 renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
-                renderer.draw_prompt(&mut std::io::stdout(), active_channel.as_deref(), &input_buffer)?;
+                renderer.draw_prompt(&mut std::io::stdout(), active_channel.as_deref(), line_editor.content(), line_editor.cursor_position())?;
             }
 
             // Handle user input
             Some(event) = input_rx.recv() => {
-                if let Event::Key(key) = event {
-                    // Handle scrolling and view mode when input is empty
-                    if input_buffer.is_empty()
-                        && handle_scroll_keys(&key, &mut renderer, active_channel.as_deref())
-                    {
-                        renderer.redraw_output_area(
-                            &mut std::io::stdout(),
-                            active_channel.as_deref(),
-                        )?;
-                        renderer.draw_status_bar(
+                match event {
+                    // Handle terminal resize (Issue #31)
+                    Event::Resize(cols, rows) => {
+                        renderer.resize(cols, rows);
+                        // Send resize to server for PTY resizing
+                        msg_tx.send(ClientMessage::Resize { cols, rows }).await?;
+                        // Redraw entire UI
+                        Renderer::clear(&mut std::io::stdout())?;
+                        renderer.draw_full_ui(
                             &mut std::io::stdout(),
                             &channels,
                             active_channel.as_deref(),
-                        )?;
-                        renderer.draw_prompt(
-                            &mut std::io::stdout(),
-                            active_channel.as_deref(),
-                            &input_buffer,
+                            line_editor.content(),
+                            line_editor.cursor_position(),
                         )?;
                         continue;
                     }
+                    Event::Key(key) => {
+                        // Handle scrolling and view mode when input is empty
+                        if line_editor.is_empty()
+                            && handle_scroll_keys(&key, &mut renderer, active_channel.as_deref())
+                        {
+                            renderer.redraw_output_area(
+                                &mut std::io::stdout(),
+                                active_channel.as_deref(),
+                            )?;
+                            renderer.draw_status_bar(
+                                &mut std::io::stdout(),
+                                &channels,
+                                active_channel.as_deref(),
+                            )?;
+                            renderer.draw_prompt(
+                                &mut std::io::stdout(),
+                                active_channel.as_deref(),
+                                line_editor.content(),
+                                line_editor.cursor_position(),
+                            )?;
+                            continue;
+                        }
 
-                    match key.code {
-                        KeyCode::Char(c) => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                match c {
-                                    'c' => {
-                                        if input_buffer.is_empty() {
-                                            // Send ETX
-                                            msg_tx.send(ClientMessage::Input { data: vec![3] }).await?;
-                                        } else {
-                                            input_buffer.clear();
+                        // Get the current channel's history
+                        let channel_key = active_channel.clone().unwrap_or_default();
+
+                        match key.code {
+                            KeyCode::Char(c) => {
+                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    match c {
+                                        'c' => {
+                                            if line_editor.is_empty() {
+                                                // Send ETX (interrupt)
+                                                msg_tx.send(ClientMessage::Input { data: vec![3] }).await?;
+                                            } else {
+                                                line_editor.clear();
+                                                // Reset history browsing when clearing
+                                                if let Some(h) = history.get_mut(&channel_key) {
+                                                    h.reset_position();
+                                                }
+                                            }
+                                        }
+                                        '\\' => {
+                                            should_exit = true;
+                                        }
+                                        'd' => {
+                                            if line_editor.is_empty() {
+                                                // Send EOT
+                                                msg_tx.send(ClientMessage::Input { data: vec![4] }).await?;
+                                            }
+                                        }
+                                        'a' => {
+                                            // Move to start of line (Ctrl+A)
+                                            line_editor.move_home();
+                                        }
+                                        'e' => {
+                                            // Move to end of line (Ctrl+E)
+                                            line_editor.move_end();
+                                        }
+                                        'w' => {
+                                            // Delete word backward (Ctrl+W)
+                                            line_editor.delete_word_backward();
+                                        }
+                                        'k' => {
+                                            // Delete to end of line (Ctrl+K)
+                                            line_editor.delete_to_end();
+                                        }
+                                        'u' => {
+                                            if line_editor.is_empty() {
+                                                // Scroll up half page when input is empty
+                                                let half_page = renderer.visible_output_rows() / 2;
+                                                renderer.scroll_up(active_channel.as_deref(), half_page.max(1));
+                                                renderer.redraw_output_area(&mut std::io::stdout(), active_channel.as_deref())?;
+                                                renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
+                                            } else {
+                                                // Delete to start of line (Ctrl+U)
+                                                line_editor.delete_to_start();
+                                            }
+                                        }
+                                        'b' => {
+                                            // Scroll down half page
+                                            let half_page = renderer.visible_output_rows() / 2;
+                                            renderer.scroll_down(active_channel.as_deref(), half_page.max(1));
+                                            renderer.redraw_output_area(&mut std::io::stdout(), active_channel.as_deref())?;
+                                            renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
+                                        }
+                                        _ => {} // Ignore other control chars
+                                    }
+                                } else {
+                                    line_editor.insert(c);
+                                    // Auto-scroll to bottom when user starts typing
+                                    renderer.scroll_to_bottom(active_channel.as_deref());
+                                    // Reset history browsing when typing new content
+                                    if let Some(h) = history.get_mut(&channel_key) {
+                                        h.reset_position();
+                                    }
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                line_editor.backspace();
+                            }
+                            KeyCode::Delete => {
+                                line_editor.delete();
+                            }
+                            KeyCode::Left => {
+                                line_editor.move_left();
+                            }
+                            KeyCode::Right => {
+                                line_editor.move_right();
+                            }
+                            KeyCode::Home => {
+                                if !line_editor.is_empty() {
+                                    line_editor.move_home();
+                                }
+                                // When empty, Home is handled by scroll_keys
+                            }
+                            KeyCode::End => {
+                                if !line_editor.is_empty() {
+                                    line_editor.move_end();
+                                }
+                                // When empty, End is handled by scroll_keys
+                            }
+                            KeyCode::Up => {
+                                // Navigate history (older)
+                                let channel_history = history
+                                    .entry(channel_key.clone())
+                                    .or_insert_with(|| CommandHistory::new(1000));
+                                if let Some(cmd) = channel_history.up(line_editor.content()) {
+                                    line_editor.set(cmd);
+                                }
+                            }
+                            KeyCode::Down => {
+                                // Navigate history (newer)
+                                let channel_history = history
+                                    .entry(channel_key.clone())
+                                    .or_insert_with(|| CommandHistory::new(1000));
+                                if let Some(cmd) = channel_history.down() {
+                                    line_editor.set(cmd);
+                                }
+                            }
+                            KeyCode::Enter => {
+                                let input_content = line_editor.take();
+
+                                // Add to history before processing
+                                if !input_content.is_empty() {
+                                    let channel_history = history
+                                        .entry(channel_key.clone())
+                                        .or_insert_with(|| CommandHistory::new(1000));
+                                    channel_history.add(&input_content);
+                                }
+
+                                match parse_input(&input_content) {
+                                    Ok(ParsedInput::Text(text)) => {
+                                        let mut data = text.into_bytes();
+                                        data.push(b'\n');
+                                        msg_tx.send(ClientMessage::Input { data }).await?;
+                                    }
+                                    Ok(ParsedInput::SwitchChannel(name)) => {
+                                        msg_tx.send(ClientMessage::SwitchChannel { name }).await?;
+                                    }
+                                    Ok(ParsedInput::SendToChannel { channel, command }) => {
+                                        msg_tx.send(ClientMessage::InputTo {
+                                            channel,
+                                            data: format!("{}\n", command).into_bytes()
+                                        }).await?;
+                                    }
+                                    Ok(ParsedInput::ControlCommand { command, args }) => {
+                                        match handle_control_command(
+                                            &command,
+                                            args,
+                                            &mut renderer,
+                                            &msg_tx,
+                                            &channels,
+                                            &mut active_channel,
+                                            &subscriptions,
+                                            &input_content,
+                                        ).await? {
+                                            CommandResult::Exit => should_exit = true,
+                                            CommandResult::Continue => {}
                                         }
                                     }
-                                    '\\' => {
-                                        should_exit = true;
+                                    Err(_e) => {
+                                        // Print error locally
+                                        // We don't have a good way to print local error log yet in renderer
                                     }
-                                    'd' => {
-                                         if input_buffer.is_empty() {
-                                            // Send EOT
-                                            msg_tx.send(ClientMessage::Input { data: vec![4] }).await?;
-                                         }
-                                    }
-                                    'u' => {
-                                        // Scroll up half page
-                                        let half_page = renderer.visible_output_rows() / 2;
-                                        renderer.scroll_up(active_channel.as_deref(), half_page.max(1));
-                                        renderer.redraw_output_area(&mut std::io::stdout(), active_channel.as_deref())?;
-                                        renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
-                                    }
-                                    'b' => {
-                                        // Scroll down half page
-                                        let half_page = renderer.visible_output_rows() / 2;
-                                        renderer.scroll_down(active_channel.as_deref(), half_page.max(1));
-                                        renderer.redraw_output_area(&mut std::io::stdout(), active_channel.as_deref())?;
-                                        renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
-                                    }
-                                    _ => {} // Ignore other control chars
-                                }
-                            } else {
-                                input_buffer.push(c);
-                                // Auto-scroll to bottom when user starts typing
-                                renderer.scroll_to_bottom(active_channel.as_deref());
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            input_buffer.pop();
-                        }
-                        KeyCode::Enter => {
-                            match parse_input(&input_buffer) {
-                                Ok(ParsedInput::Text(text)) => {
-                                    let mut data = text.into_bytes();
-                                    data.push(b'\n');
-                                    msg_tx.send(ClientMessage::Input { data }).await?;
-                                }
-                                Ok(ParsedInput::SwitchChannel(name)) => {
-                                    msg_tx.send(ClientMessage::SwitchChannel { name }).await?;
-                                }
-                                Ok(ParsedInput::SendToChannel { channel, command }) => {
-                                    msg_tx.send(ClientMessage::InputTo {
-                                        channel,
-                                        data: format!("{}\n", command).into_bytes()
-                                    }).await?;
-                                }
-                                Ok(ParsedInput::ControlCommand { command, args }) => {
-                                    match handle_control_command(
-                                        &command,
-                                        args,
-                                        &mut renderer,
-                                        &msg_tx,
-                                        &channels,
-                                        &mut active_channel,
-                                        &subscriptions,
-                                        &input_buffer,
-                                    ).await? {
-                                        CommandResult::Exit => should_exit = true,
-                                        CommandResult::Continue => {}
-                                    }
-                                }
-                                Err(_e) => {
-                                     // Print error locally
-                                     // We don't have a good way to print local error log yet in renderer
                                 }
                             }
-                            input_buffer.clear();
+                            _ => {} // Ignore other key events
                         }
-                        _ => {} // Ignore other key events
+                        renderer.draw_prompt(&mut std::io::stdout(), active_channel.as_deref(), line_editor.content(), line_editor.cursor_position())?;
                     }
-                    renderer.draw_prompt(&mut std::io::stdout(), active_channel.as_deref(), &input_buffer)?;
+                    _ => {} // Ignore other events (mouse, focus, paste)
                 }
             }
 
