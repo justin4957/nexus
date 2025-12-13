@@ -399,20 +399,22 @@ impl Renderer {
     ) -> io::Result<()> {
         queue!(stdout, cursor::MoveTo(0, row))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+        // Flush queued commands before writing raw content
+        stdout.flush()?;
 
         // For content with ANSI codes, we need to truncate based on visible length
         let visible_len = Self::visible_len(content);
         let max_line_len = self.size.0 as usize;
 
+        // Write content directly to preserve ANSI escape sequences
         if visible_len > max_line_len && max_line_len > 0 {
-            // Truncate the visible content, preserving ANSI codes
             let display_line = truncate_with_ansi(content, max_line_len);
-            queue!(stdout, Print(display_line))?;
+            stdout.write_all(display_line.as_bytes())?;
         } else {
-            queue!(stdout, Print(content))?;
+            stdout.write_all(content.as_bytes())?;
+            // Reset colors after content to prevent color bleeding
+            stdout.write_all(b"\x1b[0m")?;
         }
-        // Reset colors after each line to prevent color bleeding
-        queue!(stdout, ResetColor)?;
 
         Ok(())
     }
@@ -438,20 +440,23 @@ impl Renderer {
         queue!(stdout, Print(format!("#{:<8}", channel_name)))?;
         queue!(stdout, ResetColor)?;
         queue!(stdout, Print(" │ "))?;
+        // Flush queued commands before writing raw content
+        stdout.flush()?;
 
         // Truncate line if it's too long (accounting for ANSI codes)
         let prefix_len = 12; // "#channel  │ "
         let max_line_len = (self.size.0 as usize).saturating_sub(prefix_len);
         let visible_len = Self::visible_len(content);
 
+        // Write content directly to preserve ANSI escape sequences
         if visible_len > max_line_len && max_line_len > 0 {
             let display_line = truncate_with_ansi(content, max_line_len);
-            queue!(stdout, Print(display_line))?;
+            stdout.write_all(display_line.as_bytes())?;
         } else {
-            queue!(stdout, Print(content))?;
+            stdout.write_all(content.as_bytes())?;
+            // Reset colors after content to prevent color bleeding
+            stdout.write_all(b"\x1b[0m")?;
         }
-        // Reset colors after each line to prevent color bleeding
-        queue!(stdout, ResetColor)?;
 
         Ok(())
     }
