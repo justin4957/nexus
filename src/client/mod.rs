@@ -6,12 +6,13 @@ mod renderer;
 
 use crate::client::commands::{handle_control_command, CommandResult};
 use crate::client::input::{parse_input, ParsedInput};
-use crate::client::renderer::{ChannelStatusInfo, Renderer};
+use crate::client::renderer::{strip_ansi_codes, ChannelStatusInfo, Renderer};
 use crate::config::Config;
 use crate::protocol::{ChannelEvent, ClientMessage, ServerMessage};
 use crate::server::connection::{read_message, write_message};
 use anyhow::{anyhow, Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio::net::UnixStream;
@@ -221,6 +222,8 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     let mut active_channel: Option<String> = None;
     let mut subscriptions: Vec<String> = Vec::new();
     let mut should_exit = false;
+    // Buffer for partial lines (output without trailing newline) per channel
+    let mut line_buffers: HashMap<String, String> = HashMap::new();
 
     // Redraw initially with full UI layout
     Renderer::clear(&mut std::io::stdout())?;
@@ -273,16 +276,40 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                             }
                         }
 
-                        // Display if it's the active channel
-                        // TODO: Implement background output handling (maybe just status indicator)
-                        // For now, only print if active or maybe we print everything with channel prefix?
-                        // Renderer::draw_output_line prints with channel name.
+                        // Convert to string and strip ANSI escape codes
+                        let raw_text = String::from_utf8_lossy(&data);
+                        let text = strip_ansi_codes(&raw_text);
 
-                        let text = String::from_utf8_lossy(&data);
-
-                        for line in text.lines() {
-                             renderer.draw_output_line(&mut std::io::stdout(), &channel, line)?;
+                        if text.is_empty() {
+                            continue;
                         }
+
+                        // Get or create the line buffer for this channel
+                        let buffer = line_buffers.entry(channel.clone()).or_default();
+
+                        // Append new text to buffer
+                        buffer.push_str(&text);
+
+                        // Process complete lines (those ending with \n)
+                        // Keep any partial line (no trailing \n) in the buffer
+                        while let Some(newline_pos) = buffer.find('\n') {
+                            let line = buffer[..newline_pos].to_string();
+                            *buffer = buffer[newline_pos + 1..].to_string();
+
+                            // Clean up the line
+                            let clean_line = line.trim_end_matches('\r');
+
+                            // Skip empty lines and lines that are just whitespace
+                            if clean_line.trim().is_empty() {
+                                continue;
+                            }
+
+                            renderer.draw_output_line(&mut std::io::stdout(), &channel, clean_line)?;
+                        }
+
+                        // Redraw status bar and prompt after output
+                        renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
+                        renderer.draw_prompt(&mut std::io::stdout(), active_channel.as_deref(), &input_buffer)?;
                     }
                     ServerMessage::ChannelList { channels: list } => {
                         let active_from_server = list
@@ -341,13 +368,17 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                 renderer.clear_channel_color(&name);
                             }
                             ChannelEvent::ActiveChanged { name } => {
-                                active_channel = Some(name);
+                                active_channel = Some(name.clone());
                                 // Clear has_new_output for this channel
-                                if let Some(active) = active_channel.as_ref() {
-                                    if let Some(c) = channels.iter_mut().find(|c| c.name == *active) {
-                                        c.has_new_output = false;
-                                    }
+                                if let Some(c) = channels.iter_mut().find(|c| c.name == name) {
+                                    c.has_new_output = false;
                                 }
+                                // Show channel switch message (don't clear - preserve log history)
+                                renderer.draw_output_line(
+                                    &mut std::io::stdout(),
+                                    "SYSTEM",
+                                    &format!("Switched to channel: #{}", name),
+                                )?;
                             }
                             ChannelEvent::SubscriptionChanged { subscribed } => {
                                 subscriptions = subscribed.clone();

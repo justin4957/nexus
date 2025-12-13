@@ -129,9 +129,14 @@ pub async fn handle_control_command(
             )?;
         }
         "clear" => {
+            renderer.clear_output_buffer();
             Renderer::clear(&mut stdout)?;
-            renderer.draw_status_bar(&mut stdout, channels, active_channel.as_deref())?;
-            renderer.draw_prompt(&mut stdout, active_channel.as_deref(), input_buffer)?;
+            renderer.draw_full_ui(
+                &mut stdout,
+                channels,
+                active_channel.as_deref(),
+                input_buffer,
+            )?;
         }
         "quit" | "exit" => return Ok(CommandResult::Exit),
         _ => {
