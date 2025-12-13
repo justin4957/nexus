@@ -167,7 +167,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     // Actually, we'll just handle it in the loop
 
     // Setup UI
-    let renderer = Renderer::new()?;
+    let mut renderer = Renderer::new()?;
     Renderer::enter_raw_mode()?;
 
     // Channels for communication
@@ -214,6 +214,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     let mut input_buffer = String::new();
     let mut channels: Vec<ChannelStatusInfo> = Vec::new();
     let mut active_channel: Option<String> = None;
+    let mut subscriptions: Vec<String> = Vec::new();
     let mut should_exit = false;
 
     // Redraw initially
@@ -248,26 +249,35 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                         // Renderer::draw_output_line prints with channel name.
 
                         let text = String::from_utf8_lossy(&data);
-                        let color = if Some(channel.as_str()) == active_channel.as_deref() {
-                            crossterm::style::Color::White
-                        } else {
-                            crossterm::style::Color::DarkGrey
-                        };
 
                         for line in text.lines() {
-                             renderer.draw_output_line(&mut std::io::stdout(), &channel, line, color)?;
+                             renderer.draw_output_line(&mut std::io::stdout(), &channel, line)?;
                         }
                     }
                     ServerMessage::ChannelList { channels: list } => {
-                        channels = list.into_iter().map(|info| ChannelStatusInfo {
-                            name: info.name,
-                            running: info.running,
-                            has_new_output: false,
-                            exit_code: None,
-                        }).collect();
+                        let active_from_server = list
+                            .iter()
+                            .find(|info| info.is_active)
+                            .map(|info| info.name.clone());
+                        subscriptions = list
+                            .iter()
+                            .filter(|info| info.is_subscribed)
+                            .map(|info| info.name.clone())
+                            .collect();
 
-                        // Update active channel from list if we don't know it
-                        if active_channel.is_none() {
+                        channels = list
+                            .into_iter()
+                            .map(|info| ChannelStatusInfo {
+                                name: info.name,
+                                running: info.running,
+                                has_new_output: false,
+                                exit_code: None,
+                            })
+                            .collect();
+
+                        if let Some(active) = active_from_server {
+                            active_channel = Some(active);
+                        } else if active_channel.is_none() {
                              if let Some(c) = channels.first() {
                                  active_channel = Some(c.name.clone());
                              }
@@ -291,25 +301,46 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                     c.running = false;
                                     c.exit_code = exit_code;
                                 }
+                                renderer.clear_channel_color(&name);
+                            }
+                            ChannelEvent::Killed { name } => {
+                                if let Some(c) = channels.iter_mut().find(|c| c.name == name) {
+                                    c.running = false;
+                                    c.exit_code = None;
+                                }
+                                renderer.clear_channel_color(&name);
                             }
                             ChannelEvent::ActiveChanged { name } => {
                                 active_channel = Some(name);
                                 // Clear has_new_output for this channel
-                                if let Some(c) = channels.iter_mut().find(|c| c.name == *active_channel.as_ref().unwrap()) {
-                                    c.has_new_output = false;
+                                if let Some(active) = active_channel.as_ref() {
+                                    if let Some(c) = channels.iter_mut().find(|c| c.name == *active) {
+                                        c.has_new_output = false;
+                                    }
                                 }
                             }
-                            _ => {} // Ignore other events for now
+                            ChannelEvent::SubscriptionChanged { subscribed } => {
+                                subscriptions = subscribed.clone();
+                                renderer.draw_output_line(
+                                    &mut std::io::stdout(),
+                                    "SYSTEM",
+                                    &format!(
+                                        "Subscriptions updated: {}",
+                                        if subscriptions.is_empty() {
+                                            "none".to_string()
+                                        } else {
+                                            subscriptions.join(", ")
+                                        }
+                                    ),
+                                )?;
+                            }
                         }
-                        // Request list to sync? Or just rely on events.
-                        // Events are fine.
                     }
                     ServerMessage::Error { message } => {
                          renderer.draw_output_line(
                              &mut std::io::stdout(),
                              "SYSTEM",
-                             &format!("Error: {}", message),
-                             crossterm::style::Color::Red
+                             &format!("Error: {}", message)
                          )?;
                     }
                     _ => {} // Ignore other server messages for now
@@ -368,10 +399,70 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                         data: format!("{}\n", command).into_bytes()
                                     }).await?;
                                 }
-                                Ok(ParsedInput::ControlCommand { command, args: _ }) => {
+                                Ok(ParsedInput::ControlCommand { command, args }) => {
                                     match command.as_str() {
                                         "exit" | "quit" => should_exit = true,
                                         "list" => { msg_tx.send(ClientMessage::ListChannels).await?; },
+                                        "sub" | "subscribe" => {
+                                            if args.is_empty() {
+                                                renderer.draw_output_line(
+                                                    &mut std::io::stdout(),
+                                                    "SYSTEM",
+                                                    "Usage: :sub <channel1> [channel2...] or :sub * for all",
+                                                )?;
+                                                renderer.draw_output_line(
+                                                    &mut std::io::stdout(),
+                                                    "SYSTEM",
+                                                    &format!(
+                                                        "Current subscriptions: {}",
+                                                        if subscriptions.is_empty() {
+                                                            "none".to_string()
+                                                        } else {
+                                                            subscriptions.join(", ")
+                                                        }
+                                                    ),
+                                                )?;
+                                            } else {
+                                                msg_tx.send(ClientMessage::Subscribe { channels: args }).await?;
+                                            }
+                                        },
+                                        "unsub" | "unsubscribe" => {
+                                            if args.is_empty() {
+                                                renderer.draw_output_line(
+                                                    &mut std::io::stdout(),
+                                                    "SYSTEM",
+                                                    "Usage: :unsub <channel1> [channel2...]",
+                                                )?;
+                                                renderer.draw_output_line(
+                                                    &mut std::io::stdout(),
+                                                    "SYSTEM",
+                                                    &format!(
+                                                        "Current subscriptions: {}",
+                                                        if subscriptions.is_empty() {
+                                                            "none".to_string()
+                                                        } else {
+                                                            subscriptions.join(", ")
+                                                        }
+                                                    ),
+                                                )?;
+                                            } else {
+                                                msg_tx.send(ClientMessage::Unsubscribe { channels: args }).await?;
+                                            }
+                                        },
+                                        "subs" | "subscriptions" => {
+                                            renderer.draw_output_line(
+                                                &mut std::io::stdout(),
+                                                "SYSTEM",
+                                                &format!(
+                                                    "Current subscriptions: {}",
+                                                    if subscriptions.is_empty() {
+                                                        "none".to_string()
+                                                    } else {
+                                                        subscriptions.join(", ")
+                                                    }
+                                                ),
+                                            )?;
+                                        },
                                         _ => {
                                             // TODO: Implement other commands
                                         }

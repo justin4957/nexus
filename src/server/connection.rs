@@ -4,6 +4,7 @@ use crate::protocol::{
     deserialize, frame_message, serialize, ClientMessage, ServerMessage, PROTOCOL_VERSION,
 };
 use anyhow::{anyhow, Result};
+use std::collections::HashSet;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::mpsc;
@@ -16,6 +17,9 @@ pub struct ClientConnection {
 
     /// Channel to send messages to this client
     sender: mpsc::Sender<ServerMessage>,
+
+    /// Channels this client is subscribed to
+    subscriptions: HashSet<String>,
 }
 
 impl ClientConnection {
@@ -24,6 +28,7 @@ impl ClientConnection {
         Self {
             id: Uuid::new_v4(),
             sender,
+            subscriptions: HashSet::new(),
         }
     }
 
@@ -38,6 +43,30 @@ impl ClientConnection {
             .send(msg)
             .await
             .map_err(|_| anyhow!("Failed to send message to client"))
+    }
+
+    /// Subscribe to channels
+    pub fn subscribe(&mut self, channels: &[String]) {
+        self.subscriptions.extend(channels.iter().cloned());
+    }
+
+    /// Unsubscribe from channels
+    pub fn unsubscribe(&mut self, channels: &[String]) {
+        for channel in channels {
+            self.subscriptions.remove(channel);
+        }
+    }
+
+    /// Check if subscribed to a channel
+    pub fn is_subscribed(&self, channel: &str) -> bool {
+        self.subscriptions.contains(channel)
+    }
+
+    /// Get a list of current subscriptions
+    pub fn get_subscriptions(&self) -> Vec<String> {
+        let mut subs: Vec<_> = self.subscriptions.iter().cloned().collect();
+        subs.sort();
+        subs
     }
 }
 

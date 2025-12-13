@@ -3,6 +3,7 @@
 mod manager;
 mod pty_handler;
 
+pub use manager::ChannelListItem;
 pub use manager::ChannelManager;
 pub use manager::ChannelManagerEvent;
 pub use pty_handler::PtyChannel;

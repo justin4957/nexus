@@ -10,7 +10,7 @@ use crate::{
     protocol::{ChannelEvent, ClientMessage, ServerMessage, PROTOCOL_VERSION},
 };
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
@@ -150,18 +150,29 @@ async fn handle_client(stream: UnixStream, state: Arc<RwLock<ServerState>>) -> R
 
     // Create message channel for this client
     let (tx, rx) = mpsc::channel::<ServerMessage>(256);
-    let client = ClientConnection::new(tx);
+    let mut client = ClientConnection::new(tx);
     let client_id = client.id();
 
     tracing::info!("Client connected: {}", client_id);
 
-    // Get session ID for welcome message
-    let session_id = {
-        let mut state = state.write().await;
-        state.session.add_client(client_id);
-        state.clients.insert(client_id, client);
-        state.session.id()
+    // New clients subscribe to the active channel (if any) by default to avoid overwhelming output.
+    let (session_id, initial_channels) = {
+        let state_guard = state.read().await;
+        let initial = state_guard
+            .channel_manager
+            .active_channel()
+            .map(|name| vec![name.to_string()])
+            .unwrap_or_default();
+        (state_guard.session.id(), initial)
     };
+    client.subscribe(&initial_channels);
+
+    // Add client to state
+    {
+        let mut state_guard = state.write().await;
+        state_guard.session.add_client(client_id);
+        state_guard.clients.insert(client_id, client);
+    }
 
     // Spawn writer task
     let writer_handle = tokio::spawn(client_writer_task(writer, rx));
@@ -292,7 +303,18 @@ async fn process_message(
 
         ClientMessage::ListChannels => {
             let state_guard = state.read().await;
-            let infos = state_guard.channel_manager.list_channels_info();
+            let client = state_guard.clients.get(&client_id).unwrap();
+            let infos = state_guard
+                .channel_manager
+                .list_channels_info()
+                .into_iter()
+                .map(|info| crate::protocol::ChannelInfo {
+                    is_subscribed: client.is_subscribed(&info.name),
+                    is_active: info.is_active,
+                    name: info.name,
+                    running: info.running,
+                })
+                .collect();
             Some(ServerMessage::ChannelList { channels: infos })
         }
 
@@ -317,12 +339,60 @@ async fn process_message(
             })
         }
 
+        ClientMessage::Subscribe { channels } => {
+            let mut state_guard = state.write().await;
+            let known_channels: HashSet<_> = state_guard
+                .channel_manager
+                .list_channels()
+                .into_iter()
+                .collect();
+
+            let mut target_channels = Vec::new();
+            if channels.iter().any(|c| c == "*") {
+                target_channels.extend(known_channels.iter().cloned());
+            } else {
+                for channel in channels {
+                    if known_channels.contains(&channel) {
+                        target_channels.push(channel);
+                    } else {
+                        tracing::warn!(
+                            "Client {} attempted to subscribe to unknown channel '{}'",
+                            client_id,
+                            channel
+                        );
+                    }
+                }
+            }
+
+            if let Some(client) = state_guard.clients.get_mut(&client_id) {
+                client.subscribe(&target_channels);
+                let subs = client.get_subscriptions();
+                Some(ServerMessage::Event(ChannelEvent::SubscriptionChanged {
+                    subscribed: subs,
+                }))
+            } else {
+                Some(create_error_message("Client not found".to_string()))
+            }
+        }
+
+        ClientMessage::Unsubscribe { channels } => {
+            let mut state_guard = state.write().await;
+            if let Some(client) = state_guard.clients.get_mut(&client_id) {
+                client.unsubscribe(&channels);
+
+                let subs = client.get_subscriptions();
+                Some(ServerMessage::Event(ChannelEvent::SubscriptionChanged {
+                    subscribed: subs,
+                }))
+            } else {
+                Some(create_error_message("Client not found".to_string()))
+            }
+        }
+
         // These will be implemented in Phase 2
         ClientMessage::Input { .. }
         | ClientMessage::InputTo { .. }
         | ClientMessage::SwitchChannel { .. }
-        | ClientMessage::Subscribe { .. }
-        | ClientMessage::Unsubscribe { .. }
         | ClientMessage::Resize { .. } => Some(create_error_message(
             "Channel operations not yet implemented".to_string(),
         )),
@@ -347,23 +417,60 @@ async fn broadcast_to_clients(msg: ServerMessage, state: &Arc<RwLock<ServerState
 async fn handle_channel_event(event: ChannelManagerEvent, state: &Arc<RwLock<ServerState>>) {
     match event {
         ChannelManagerEvent::Output { channel_name, data } => {
-            // Check if anyone is subscribed before broadcasting
+            let msg = ServerMessage::Output {
+                channel: channel_name.clone(),
+                data,
+                timestamp: chrono::Utc::now().timestamp_millis(),
+            };
+
             let state_read = state.read().await;
-            if state_read.channel_manager.is_subscribed(&channel_name) {
-                let msg = ServerMessage::Output {
-                    channel: channel_name,
-                    data,
-                    timestamp: chrono::Utc::now().timestamp_millis(),
-                };
-                // Drop read lock before calling broadcast, which will take a read lock again.
-                drop(state_read);
-                broadcast_to_clients(msg, state).await;
+            // TODO: Maintain a subscription index to avoid scanning all clients on every output event.
+            for client in state_read.clients.values() {
+                if client.is_subscribed(&channel_name) {
+                    if let Err(e) = client.send(msg.clone()).await {
+                        tracing::warn!("Failed to send output to client {}: {}", client.id(), e);
+                    }
+                }
             }
         }
         ChannelManagerEvent::StateChanged {
             channel_name,
             state: channel_state,
         } => {
+            let mut subscription_updates = Vec::new();
+            if matches!(
+                channel_state,
+                crate::channel::ChannelState::Killed | crate::channel::ChannelState::Exited(_)
+            ) {
+                let mut state_guard = state.write().await;
+                for (client_id, client) in state_guard.clients.iter_mut() {
+                    if client.is_subscribed(&channel_name) {
+                        client.unsubscribe(std::slice::from_ref(&channel_name));
+                        subscription_updates.push((*client_id, client.get_subscriptions()));
+                    }
+                }
+            }
+
+            if !subscription_updates.is_empty() {
+                let state_read = state.read().await;
+                for (client_id, subs) in subscription_updates {
+                    if let Some(client) = state_read.clients.get(&client_id) {
+                        if let Err(e) = client
+                            .send(ServerMessage::Event(ChannelEvent::SubscriptionChanged {
+                                subscribed: subs.clone(),
+                            }))
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to notify client {} of subscription update: {}",
+                                client_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
             let server_event = match channel_state {
                 // We broadcast Created events from the message handler to get an Ack.
                 crate::channel::ChannelState::Running => None,

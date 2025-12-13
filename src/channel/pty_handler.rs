@@ -13,6 +13,8 @@ use tokio::{
     task,
 };
 
+// Fields are deliberately kept for future server-side status reporting; suppress dead_code lint until wired.
+#[allow(dead_code)]
 /// A single PTY channel
 pub struct PtyChannel {
     /// Channel name
