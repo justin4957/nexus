@@ -45,16 +45,26 @@ impl ClientConnection {
             .map_err(|_| anyhow!("Failed to send message to client"))
     }
 
-    /// Subscribe to channels
-    pub fn subscribe(&mut self, channels: &[String]) {
-        self.subscriptions.extend(channels.iter().cloned());
+    /// Subscribe to channels; returns newly added channel names.
+    pub fn subscribe(&mut self, channels: &[String]) -> Vec<String> {
+        let mut newly_added = Vec::new();
+        for channel in channels {
+            if self.subscriptions.insert(channel.clone()) {
+                newly_added.push(channel.clone());
+            }
+        }
+        newly_added
     }
 
     /// Unsubscribe from channels
-    pub fn unsubscribe(&mut self, channels: &[String]) {
+    pub fn unsubscribe(&mut self, channels: &[String]) -> Vec<String> {
+        let mut removed = Vec::new();
         for channel in channels {
-            self.subscriptions.remove(channel);
+            if self.subscriptions.remove(channel) {
+                removed.push(channel.clone());
+            }
         }
+        removed
     }
 
     /// Check if subscribed to a channel
