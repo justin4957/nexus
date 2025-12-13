@@ -137,9 +137,13 @@ impl Renderer {
     }
 
     /// Update terminal size
-    #[allow(dead_code)]
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.size = (cols, rows);
+    }
+
+    /// Get terminal size
+    pub fn terminal_size(&self) -> (u16, u16) {
+        self.size
     }
 
     /// Get current view mode
@@ -306,12 +310,13 @@ impl Renderer {
         stdout.flush()
     }
 
-    /// Draw the prompt line with enhanced visuals
+    /// Draw the prompt line with enhanced visuals and cursor positioning
     pub fn draw_prompt(
         &self,
         stdout: &mut impl Write,
         active_channel: Option<&str>,
         input: &str,
+        cursor_pos: usize,
     ) -> io::Result<()> {
         let prompt_row = self.prompt_row();
         queue!(stdout, cursor::MoveTo(0, prompt_row))?;
@@ -327,13 +332,24 @@ impl Renderer {
         queue!(stdout, Print(" ❯ "))?;
         queue!(stdout, ResetColor)?;
 
+        // Calculate prompt prefix length for cursor positioning
+        // "@channel ❯ " - the ❯ is 3 bytes in UTF-8
+        let prefix_len = 1 + channel_display.len() + 4; // @ + channel + " ❯ "
+
         // Draw input or placeholder
         if input.is_empty() {
             queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
             queue!(stdout, Print("Type :help for commands"))?;
             queue!(stdout, ResetColor)?;
+            // Position cursor at start of input area
+            queue!(stdout, cursor::MoveTo(prefix_len as u16, prompt_row))?;
         } else {
             queue!(stdout, Print(input))?;
+            // Calculate cursor column position
+            // cursor_pos is a byte index, we need to count characters for display
+            let chars_before_cursor = input[..cursor_pos].chars().count();
+            let cursor_col = prefix_len + chars_before_cursor;
+            queue!(stdout, cursor::MoveTo(cursor_col as u16, prompt_row))?;
         }
 
         stdout.flush()
@@ -383,15 +399,22 @@ impl Renderer {
     ) -> io::Result<()> {
         queue!(stdout, cursor::MoveTo(0, row))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+        // Flush queued commands before writing raw content
+        stdout.flush()?;
 
-        // Truncate line if it's too long
+        // For content with ANSI codes, we need to truncate based on visible length
+        let visible_len = Self::visible_len(content);
         let max_line_len = self.size.0 as usize;
-        let display_line = if content.len() > max_line_len && max_line_len > 0 {
-            &content[..max_line_len]
+
+        // Write content directly to preserve ANSI escape sequences
+        if visible_len > max_line_len && max_line_len > 0 {
+            let display_line = truncate_with_ansi(content, max_line_len);
+            stdout.write_all(display_line.as_bytes())?;
         } else {
-            content
-        };
-        queue!(stdout, Print(display_line))?;
+            stdout.write_all(content.as_bytes())?;
+            // Reset colors after content to prevent color bleeding
+            stdout.write_all(b"\x1b[0m")?;
+        }
 
         Ok(())
     }
@@ -417,16 +440,23 @@ impl Renderer {
         queue!(stdout, Print(format!("#{:<8}", channel_name)))?;
         queue!(stdout, ResetColor)?;
         queue!(stdout, Print(" │ "))?;
+        // Flush queued commands before writing raw content
+        stdout.flush()?;
 
-        // Truncate line if it's too long
+        // Truncate line if it's too long (accounting for ANSI codes)
         let prefix_len = 12; // "#channel  │ "
         let max_line_len = (self.size.0 as usize).saturating_sub(prefix_len);
-        let display_line = if content.len() > max_line_len && max_line_len > 0 {
-            &content[..max_line_len]
+        let visible_len = Self::visible_len(content);
+
+        // Write content directly to preserve ANSI escape sequences
+        if visible_len > max_line_len && max_line_len > 0 {
+            let display_line = truncate_with_ansi(content, max_line_len);
+            stdout.write_all(display_line.as_bytes())?;
         } else {
-            content
-        };
-        queue!(stdout, Print(display_line))?;
+            stdout.write_all(content.as_bytes())?;
+            // Reset colors after content to prevent color bleeding
+            stdout.write_all(b"\x1b[0m")?;
+        }
 
         Ok(())
     }
@@ -677,6 +707,7 @@ impl Renderer {
         channels: &[ChannelStatusInfo],
         active_channel: Option<&str>,
         input: &str,
+        cursor_pos: usize,
     ) -> io::Result<()> {
         // Draw status bar
         self.draw_status_bar(stdout, channels, active_channel)?;
@@ -702,9 +733,14 @@ impl Renderer {
         queue!(stdout, ResetColor)?;
 
         // Draw prompt
-        self.draw_prompt(stdout, active_channel, input)?;
+        self.draw_prompt(stdout, active_channel, input, cursor_pos)?;
 
         stdout.flush()
+    }
+
+    /// Calculate the visible length of a string (excluding ANSI codes)
+    pub fn visible_len(s: &str) -> usize {
+        strip_ansi_codes(s).chars().count()
     }
 }
 
@@ -752,4 +788,38 @@ impl ChannelStatusInfo {
         }
         ""
     }
+}
+
+/// Truncate a string with ANSI codes to a maximum visible length.
+/// Preserves ANSI escape sequences while counting only visible characters.
+fn truncate_with_ansi(s: &str, max_visible_len: usize) -> String {
+    let mut result = String::new();
+    let mut visible_count = 0;
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Start of ANSI escape sequence
+            result.push(c);
+            // Consume the entire escape sequence
+            while let Some(&next) = chars.peek() {
+                result.push(chars.next().unwrap());
+                // CSI sequences end with a letter (A-Z, a-z) or ~
+                if next.is_ascii_alphabetic() || next == '~' {
+                    break;
+                }
+            }
+        } else {
+            // Regular visible character
+            if visible_count >= max_visible_len {
+                break;
+            }
+            result.push(c);
+            visible_count += 1;
+        }
+    }
+
+    // Add reset sequence to ensure colors don't bleed
+    result.push_str("\x1b[0m");
+    result
 }

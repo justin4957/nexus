@@ -20,7 +20,7 @@ pub async fn handle_control_command(
     channels: &[ChannelStatusInfo],
     active_channel: &mut Option<String>,
     subscriptions: &[String],
-    input_buffer: &str,
+    _input_buffer: &str,
 ) -> Result<CommandResult> {
     let mut stdout = std::io::stdout();
     let active = active_channel.as_deref();
@@ -142,7 +142,8 @@ pub async fn handle_control_command(
         "clear" => {
             renderer.clear_output_buffer(None);
             Renderer::clear(&mut stdout)?;
-            renderer.draw_full_ui(&mut stdout, channels, active, input_buffer)?;
+            // For :clear command, cursor is at end of cleared buffer (position 0)
+            renderer.draw_full_ui(&mut stdout, channels, active, "", 0)?;
         }
         "view" => {
             // Toggle or set view mode
@@ -282,6 +283,38 @@ pub async fn handle_control_command(
                 &mut stdout,
                 "SYSTEM",
                 "  Tab                 Toggle view mode (channel/all)",
+                active,
+            )?;
+            renderer.draw_output_line(&mut stdout, "SYSTEM", "", active)?;
+            renderer.draw_output_line(&mut stdout, "SYSTEM", "Line editing:", active)?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Left/Right          Move cursor within input",
+                active,
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Home/End            Jump to start/end of input (Ctrl+A/E)",
+                active,
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Up/Down             Navigate command history",
+                active,
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Ctrl+W              Delete word backward",
+                active,
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Ctrl+U/K            Delete to start/end of line",
                 active,
             )?;
             renderer.draw_output_line(&mut stdout, "SYSTEM", "", active)?;
