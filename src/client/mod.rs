@@ -168,8 +168,11 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     // Wait for Welcome (in the read loop, but we expect it first)
     // Actually, we'll just handle it in the loop
 
-    // Setup UI
-    let mut renderer = Renderer::new()?;
+    // Load config for appearance settings
+    let config = Config::load()?;
+
+    // Setup UI with config-based status bar position
+    let mut renderer = Renderer::with_position(config.appearance.status_bar_position)?;
     Renderer::enter_raw_mode()?;
 
     // Channels for communication
