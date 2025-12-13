@@ -373,14 +373,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                 if let Some(c) = channels.iter_mut().find(|c| c.name == name) {
                                     c.has_new_output = false;
                                 }
-                                // Refresh the display when switching channels
-                                Renderer::clear(&mut std::io::stdout())?;
-                                renderer.draw_full_ui(
-                                    &mut std::io::stdout(),
-                                    &channels,
-                                    active_channel.as_deref(),
-                                    &input_buffer,
-                                )?;
+                                // Show channel switch message (don't clear - preserve log history)
                                 renderer.draw_output_line(
                                     &mut std::io::stdout(),
                                     "SYSTEM",
