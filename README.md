@@ -8,7 +8,7 @@ Unlike traditional terminal multiplexers (tmux, screen) that split your screen i
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ [#build: ✓ done] [#tests: 47/100] [#server: listening:3000] │  ← Status bar
+│ [#build: ✓] [#tests*] [#server] [#logs]                     │  ← Status bar
 ├─────────────────────────────────────────────────────────────┤
 │ #build   │ Build complete in 2.3s                           │
 │ #tests   │ PASS src/auth.test.ts                            │
@@ -19,6 +19,17 @@ Unlike traditional terminal multiplexers (tmux, screen) that split your screen i
 │ @server > _                                                 │  ← Single prompt
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### Status Bar Indicators
+
+| Indicator | Meaning |
+|-----------|---------|
+| `[#name]` | Running channel (grey) |
+| `[#name]` (green) | Active channel (receives input) |
+| `[#name*]` (yellow) | Channel has new unread output |
+| `[#name: ✓]` (green) | Process exited successfully (code 0) |
+| `[#name: ✗]` (red) | Process exited with error |
+| `...` | More channels (truncated to fit terminal) |
 
 ## Key Concepts
 
@@ -59,33 +70,187 @@ cp target/release/{nexus,nexus-server} ~/.local/bin/
 
 ## Quick Start
 
+### 1. Start nexus
+
+```bash
+nexus
+```
+
+You'll see an empty interface with a prompt:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                                                             │
+│                                                             │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│ @none > _                                                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2. Create your first channel
+
+```
+:new shell
+```
+
+This creates a channel named "shell" running your default shell:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ [#shell]                                                    │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│ @shell > _                                                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3. Run commands
+
+Type any command and it runs in the active channel:
+
+```
+ls -la
+```
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ [#shell]                                                    │
+├─────────────────────────────────────────────────────────────┤
+│ #shell   │ total 48                                         │
+│ #shell   │ drwxr-xr-x  12 user  staff   384 Dec 13 10:00 .  │
+│ #shell   │ -rw-r--r--   1 user  staff  1234 Dec 13 09:30 .. │
+├─────────────────────────────────────────────────────────────┤
+│ @shell > _                                                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 4. Create more channels
+
+```
+:new build cargo watch -x build
+:new server cargo run
+```
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ [#shell] [#build] [#server]                                 │
+├─────────────────────────────────────────────────────────────┤
+│ #build   │ Compiling myapp v0.1.0                           │
+│ #server  │ Listening on 127.0.0.1:3000                      │
+│ #build   │ Finished dev [unoptimized] target(s) in 2.34s    │
+├─────────────────────────────────────────────────────────────┤
+│ @server > _                                                 │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 5. Switch between channels
+
+```
+@build              # Switch to build channel
+@shell              # Switch to shell channel
+```
+
+### 6. Send command to specific channel without switching
+
+```
+@build: cargo test
+```
+
+This runs `cargo test` in the build channel but keeps you on the current channel.
+
+### 7. Manage subscriptions
+
+```
+:sub build server   # Subscribe to build and server output
+:unsub build        # Unsubscribe from build
+:sub *              # Subscribe to all channels
+:subs               # Show current subscriptions
+```
+
+### 8. View channel status
+
+```
+:status             # Show all channel statuses
+:list               # List all channels
+```
+
+### 9. Clean up
+
+```
+:kill build         # Terminate the build channel
+:clear              # Clear the screen
+:quit               # Exit nexus (or Ctrl+\)
+```
+
+## Tutorial: Web Development Workflow
+
+Here's a real-world example using nexus for web development:
+
+### Setup your development environment
+
 ```bash
 # Start nexus
 nexus
 
-# Create channels
-:new build           # Create channel named "build"
-:new tests           # Create channel named "tests"
-:new server          # Create channel named "server"
+# Create channels for different tasks
+:new frontend npm run dev          # Frontend dev server
+:new backend cargo watch -x run    # Backend server with auto-reload
+:new tests cargo watch -x test     # Continuous test runner
+:new git                           # Git operations
+```
 
-# Switch active channel (receives your input)
-@build               # Switch to build channel
-npm run build        # This runs in the build channel
+Your status bar now shows all channels:
 
-@server              # Switch to server channel
-npm run dev          # This runs in the server channel
+```
+[#frontend] [#backend] [#tests] [#git]
+```
 
-# Subscribe/unsubscribe to output
-:sub build tests     # See output from build and tests
-:unsub tests         # Stop seeing tests output
-:sub *               # See all channel output
+### Monitor all output while working
 
-# Send command to specific channel without switching
-@tests: npm test     # Run in tests channel, stay on current
+```bash
+# Subscribe to see output from all channels
+:sub *
 
-# View channel status
-:status              # Show all channels and their states
-:status build        # Show detailed status for build channel
+# Work in the git channel
+@git
+git status
+git add .
+git commit -m "Add feature"
+```
+
+Output from all channels interleaves in your view:
+
+```
+#frontend │ Compiled successfully!
+#backend  │ Listening on 127.0.0.1:8080
+#tests    │ Running 42 tests... 42 passed
+#git      │ On branch main
+#git      │ nothing to commit, working tree clean
+```
+
+### Focus on specific channels
+
+```bash
+# Only see frontend and backend output
+:unsub tests git
+
+# Quick command to another channel without switching
+@tests: cargo test auth
+```
+
+### Check channel status
+
+```bash
+:status
+```
+
+```
+#frontend running  pid=12345 cwd=/app cmd=npm run dev
+#backend  running  pid=12346 cwd=/app cmd=cargo watch -x run
+#tests    running  pid=12347 cwd=/app cmd=cargo watch -x test
+#git      running  pid=12348 cwd=/app cmd=/bin/zsh
 ```
 
 ## Commands

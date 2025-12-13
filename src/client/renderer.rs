@@ -9,6 +9,8 @@ use std::io::{self, Write};
 
 use std::collections::{HashMap, HashSet};
 
+use crate::config::StatusBarPosition;
+
 const CHANNEL_COLORS: [Color; 6] = [
     Color::Blue,
     Color::Magenta,
@@ -18,8 +20,6 @@ const CHANNEL_COLORS: [Color; 6] = [
     Color::Red,
 ];
 
-// Renderer tracks layout/state we plan to surface; suppress unused warnings until UI grows.
-#[allow(dead_code)]
 /// Terminal renderer for nexus client
 pub struct Renderer {
     /// Terminal size (cols, rows)
@@ -32,15 +32,24 @@ pub struct Renderer {
     prompt_height: u16,
 
     /// Whether to show timestamps
+    #[allow(dead_code)]
     show_timestamps: bool,
 
     /// Map of channel names to colors
     channel_colors: HashMap<String, Color>,
+
+    /// Status bar position (top or bottom)
+    status_bar_position: StatusBarPosition,
 }
 
 impl Renderer {
-    /// Create a new renderer
+    /// Create a new renderer with default settings
     pub fn new() -> io::Result<Self> {
+        Self::with_position(StatusBarPosition::Top)
+    }
+
+    /// Create a new renderer with specified status bar position
+    pub fn with_position(position: StatusBarPosition) -> io::Result<Self> {
         let size = terminal::size()?;
 
         Ok(Self {
@@ -49,11 +58,12 @@ impl Renderer {
             prompt_height: 1,
             show_timestamps: false,
             channel_colors: HashMap::new(),
+            status_bar_position: position,
         })
     }
 
-    #[allow(dead_code)]
     /// Update terminal size
+    #[allow(dead_code)]
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.size = (cols, rows);
     }
@@ -66,6 +76,71 @@ impl Renderer {
             .saturating_sub(self.status_bar_height + self.prompt_height)
     }
 
+    /// Get the row position for the status bar based on configuration
+    fn status_bar_row(&self) -> u16 {
+        match self.status_bar_position {
+            StatusBarPosition::Top => 0,
+            StatusBarPosition::Bottom => self.size.1.saturating_sub(2), // Above prompt
+        }
+    }
+
+    /// Get the row position for the prompt
+    fn prompt_row(&self) -> u16 {
+        self.size.1.saturating_sub(1)
+    }
+
+    /// Build the status bar content with truncation support
+    fn build_status_bar_content(
+        &self,
+        channels: &[ChannelStatusInfo],
+        active_channel: Option<&str>,
+    ) -> Vec<(String, Color)> {
+        let terminal_width = self.size.0 as usize;
+        let mut segments: Vec<(String, Color)> = Vec::new();
+        let mut total_width = 0;
+        let ellipsis = " ...";
+        let ellipsis_width = ellipsis.len();
+
+        for channel in channels {
+            let color = if Some(channel.name.as_str()) == active_channel {
+                Color::Green
+            } else if channel.has_new_output {
+                Color::Yellow
+            } else if !channel.running {
+                if channel.exit_code == Some(0) {
+                    Color::DarkGreen
+                } else if channel.exit_code.is_some() {
+                    Color::DarkRed
+                } else {
+                    Color::DarkGrey
+                }
+            } else {
+                Color::DarkGrey
+            };
+
+            let segment = format!("[#{}{}]", channel.name, channel.status_indicator());
+            let segment_width = segment.len() + 1; // +1 for space separator
+
+            // Check if adding this segment would exceed terminal width
+            if total_width + segment_width > terminal_width.saturating_sub(ellipsis_width) {
+                // Check if we have more channels to show
+                let remaining = channels.len() - segments.len();
+                if remaining > 0 {
+                    segments.push((ellipsis.to_string(), Color::DarkGrey));
+                }
+                break;
+            }
+
+            if !segments.is_empty() {
+                total_width += 1; // Space between segments
+            }
+            total_width += segment.len();
+            segments.push((segment, color));
+        }
+
+        segments
+    }
+
     /// Draw the status bar
     pub fn draw_status_bar(
         &self,
@@ -73,27 +148,19 @@ impl Renderer {
         channels: &[ChannelStatusInfo],
         active_channel: Option<&str>,
     ) -> io::Result<()> {
-        queue!(stdout, cursor::MoveTo(0, 0))?;
+        let status_row = self.status_bar_row();
+        queue!(stdout, cursor::MoveTo(0, status_row))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
 
-        for (i, channel) in channels.iter().enumerate() {
-            if i > 0 {
+        let segments = self.build_status_bar_content(channels, active_channel);
+
+        for (i, (segment, color)) in segments.iter().enumerate() {
+            if i > 0 && !segment.starts_with(" ...") {
                 queue!(stdout, Print(" "))?;
             }
 
-            let color = if Some(channel.name.as_str()) == active_channel {
-                Color::Green
-            } else if channel.has_new_output {
-                Color::Yellow
-            } else {
-                Color::DarkGrey
-            };
-
-            queue!(stdout, SetForegroundColor(color))?;
-            queue!(
-                stdout,
-                Print(format!("[#{}{}]", channel.name, channel.status_indicator()))
-            )?;
+            queue!(stdout, SetForegroundColor(*color))?;
+            queue!(stdout, Print(segment))?;
         }
 
         queue!(stdout, ResetColor)?;
@@ -107,7 +174,7 @@ impl Renderer {
         active_channel: Option<&str>,
         input: &str,
     ) -> io::Result<()> {
-        let prompt_row = self.size.1.saturating_sub(1);
+        let prompt_row = self.prompt_row();
         queue!(stdout, cursor::MoveTo(0, prompt_row))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
 
@@ -193,6 +260,7 @@ impl Default for Renderer {
             prompt_height: 1,
             show_timestamps: false,
             channel_colors: HashMap::new(),
+            status_bar_position: StatusBarPosition::Top,
         })
     }
 }

@@ -190,6 +190,95 @@ cargo run -- new test-session
 # Expected: "Usage: :kill <name>"
 ```
 
+### 6. Status Bar Testing
+
+Test the status bar features implemented in Phase 3.1:
+
+**Status indicators:**
+```bash
+# Start nexus and create channels
+cargo run -- new test-session
+
+# Create a channel and verify status bar shows it
+:new shell
+# Expected: Status bar shows [#shell] in green (active)
+
+# Create more channels
+:new build cargo build
+:new tests cargo test
+# Expected: Status bar shows [#shell] [#build] [#tests]
+
+# When a process completes successfully
+# Expected: Shows [#build: ✓] in dark green
+
+# When a process exits with error
+:new fail false
+# Expected: Shows [#fail: ✗] in dark red
+
+# When channel has new output (not active)
+# Expected: Shows [#channel*] in yellow
+```
+
+**Configurable position (top/bottom):**
+```bash
+# Create config file
+mkdir -p ~/.config/nexus
+cat > ~/.config/nexus/config.toml << 'EOF'
+[appearance]
+status_bar_position = "bottom"
+EOF
+
+# Start nexus
+cargo run -- new test-session
+# Expected: Status bar appears at bottom (above prompt)
+
+# Test with top position
+cat > ~/.config/nexus/config.toml << 'EOF'
+[appearance]
+status_bar_position = "top"
+EOF
+# Expected: Status bar appears at top of terminal
+```
+
+**Truncation with many channels:**
+```bash
+# Create many channels to test truncation
+:new ch1
+:new ch2
+:new ch3
+:new ch4
+:new ch5
+:new ch6
+:new ch7
+:new ch8
+:new ch9
+:new ch10
+
+# Expected: Status bar shows as many channels as fit
+# followed by "..." indicator when truncated
+# Example: [#ch1] [#ch2] [#ch3] [#ch4] ...
+```
+
+**Color coding:**
+```bash
+# Verify color coding
+:new active
+@active
+# Expected: [#active] is green (active channel)
+
+:new background
+@active
+# Run something in background channel that produces output
+@background: echo "hello"
+# Expected: [#background*] is yellow (has new output)
+
+# Channel that stopped
+:new stopped
+@stopped
+exit
+# Expected: [#stopped: ✓] is dark green (exited 0)
+```
+
 ## Test Utilities
 
 ### Mock PTY
