@@ -445,7 +445,7 @@ async fn handle_channel_event(event: ChannelManagerEvent, state: &Arc<RwLock<Ser
                 let mut state_guard = state.write().await;
                 for (client_id, client) in state_guard.clients.iter_mut() {
                     if client.is_subscribed(&channel_name) {
-                        client.unsubscribe(&[channel_name.clone()]);
+                        client.unsubscribe(std::slice::from_ref(&channel_name));
                         subscription_updates.push((*client_id, client.get_subscriptions()));
                     }
                 }

@@ -18,6 +18,8 @@ const CHANNEL_COLORS: [Color; 6] = [
     Color::Red,
 ];
 
+// Renderer tracks layout/state we plan to surface; suppress unused warnings until UI grows.
+#[allow(dead_code)]
 /// Terminal renderer for nexus client
 pub struct Renderer {
     /// Terminal size (cols, rows)
@@ -50,12 +52,14 @@ impl Renderer {
         })
     }
 
+    #[allow(dead_code)]
     /// Update terminal size
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.size = (cols, rows);
     }
 
     /// Height available for output
+    #[allow(dead_code)]
     pub fn output_height(&self) -> u16 {
         self.size
             .1
