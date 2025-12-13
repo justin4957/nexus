@@ -105,7 +105,9 @@ async fn test_server_accepts_connection() {
 #[tokio::test]
 async fn test_server_handles_hello() {
     if !can_create_unix_socket() {
-        eprintln!("Skipping test_server_handles_hello: unix sockets not permitted in this environment");
+        eprintln!(
+            "Skipping test_server_handles_hello: unix sockets not permitted in this environment"
+        );
         return;
     }
 
