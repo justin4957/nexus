@@ -10,18 +10,27 @@ use crate::{
     protocol::{ChannelEvent, ClientMessage, ServerMessage, PROTOCOL_VERSION},
 };
 use anyhow::{anyhow, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
+const MAX_BUFFERED_OUTPUTS: usize = 200;
+
+#[derive(Clone)]
+struct BufferedOutput {
+    data: Vec<u8>,
+    timestamp: i64,
+}
+
 /// Server state shared across connections
 struct ServerState {
     session: Session,
     clients: HashMap<Uuid, ClientConnection>,
     channel_manager: ChannelManager,
+    output_buffers: HashMap<String, VecDeque<BufferedOutput>>,
 }
 
 /// Unix socket server listener
@@ -86,6 +95,7 @@ impl ServerListener {
             session: Session::new(self.session_name.clone(), self.socket_path.clone()),
             clients: HashMap::new(),
             channel_manager: ChannelManager::new(event_tx),
+            output_buffers: HashMap::new(),
         }));
 
         // Spawn the event handler task
@@ -185,6 +195,10 @@ async fn handle_client(stream: UnixStream, state: Arc<RwLock<ServerState>>) -> R
         }
     }
 
+    if !initial_channels.is_empty() {
+        send_buffered_output(client_id, &initial_channels, &state).await;
+    }
+
     // Read and process messages
     loop {
         match read_message(&mut reader).await {
@@ -273,6 +287,10 @@ async fn process_message(
             };
             match state_guard.channel_manager.create_channel(config).await {
                 Ok(()) => {
+                    state_guard
+                        .output_buffers
+                        .entry(name.clone())
+                        .or_insert_with(VecDeque::new);
                     let created_event =
                         ServerMessage::Event(ChannelEvent::Created { name: name.clone() });
                     drop(state_guard); // Release write lock before broadcasting
@@ -340,39 +358,55 @@ async fn process_message(
         }
 
         ClientMessage::Subscribe { channels } => {
-            let mut state_guard = state.write().await;
-            let known_channels: HashSet<_> = state_guard
-                .channel_manager
-                .list_channels()
-                .into_iter()
-                .collect();
+            let target_channels = {
+                let state_guard = state.read().await;
+                let known_channels: HashSet<_> = state_guard
+                    .channel_manager
+                    .list_channels()
+                    .into_iter()
+                    .collect();
 
-            let mut target_channels = Vec::new();
-            if channels.iter().any(|c| c == "*") {
-                target_channels.extend(known_channels.iter().cloned());
-            } else {
-                for channel in channels {
-                    if known_channels.contains(&channel) {
-                        target_channels.push(channel);
-                    } else {
-                        tracing::warn!(
-                            "Client {} attempted to subscribe to unknown channel '{}'",
-                            client_id,
-                            channel
-                        );
-                    }
+                if channels.iter().any(|c| c == "*") {
+                    known_channels.into_iter().collect::<Vec<_>>()
+                } else {
+                    channels
+                        .into_iter()
+                        .filter(|channel| {
+                            if known_channels.contains(channel) {
+                                true
+                            } else {
+                                tracing::warn!(
+                                    "Client {} attempted to subscribe to unknown channel '{}'",
+                                    client_id,
+                                    channel
+                                );
+                                false
+                            }
+                        })
+                        .collect()
                 }
-            }
+            };
 
-            if let Some(client) = state_guard.clients.get_mut(&client_id) {
-                client.subscribe(&target_channels);
-                let subs = client.get_subscriptions();
-                Some(ServerMessage::Event(ChannelEvent::SubscriptionChanged {
-                    subscribed: subs,
-                }))
-            } else {
-                Some(create_error_message("Client not found".to_string()))
-            }
+            let response = {
+                let mut state_guard = state.write().await;
+                if let Some(client) = state_guard.clients.get_mut(&client_id) {
+                    let newly_added = client.subscribe(&target_channels);
+                    let subs = client.get_subscriptions();
+                    drop(state_guard);
+
+                    if !newly_added.is_empty() {
+                        send_buffered_output(client_id, &newly_added, state).await;
+                    }
+
+                    Some(ServerMessage::Event(ChannelEvent::SubscriptionChanged {
+                        subscribed: subs,
+                    }))
+                } else {
+                    Some(create_error_message("Client not found".to_string()))
+                }
+            };
+
+            response
         }
 
         ClientMessage::Unsubscribe { channels } => {
@@ -413,20 +447,88 @@ async fn broadcast_to_clients(msg: ServerMessage, state: &Arc<RwLock<ServerState
     }
 }
 
+/// Send buffered output for specified channels to the given client.
+async fn send_buffered_output(
+    client_id: Uuid,
+    channels: &[String],
+    state: &Arc<RwLock<ServerState>>,
+) {
+    let buffers: Vec<(String, Vec<BufferedOutput>)> = {
+        let state_guard = state.read().await;
+        channels
+            .iter()
+            .filter_map(|channel| {
+                state_guard
+                    .output_buffers
+                    .get(channel)
+                    .map(|buf| (channel.clone(), buf.iter().cloned().collect()))
+            })
+            .collect()
+    };
+
+    if buffers.is_empty() {
+        return;
+    }
+
+    let state_read = state.read().await;
+    if let Some(client) = state_read.clients.get(&client_id) {
+        for (channel, entries) in buffers {
+            for entry in entries {
+                if let Err(e) = client
+                    .send(ServerMessage::Output {
+                        channel: channel.clone(),
+                        data: entry.data.clone(),
+                        timestamp: entry.timestamp,
+                    })
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to send buffered output to client {}: {}",
+                        client_id,
+                        e
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Handles events coming from the ChannelManager.
 async fn handle_channel_event(event: ChannelManagerEvent, state: &Arc<RwLock<ServerState>>) {
     match event {
         ChannelManagerEvent::Output { channel_name, data } => {
+            let timestamp = chrono::Utc::now().timestamp_millis();
+            let mut recipients = Vec::new();
+            {
+                let mut state_guard = state.write().await;
+                let buffer = state_guard
+                    .output_buffers
+                    .entry(channel_name.clone())
+                    .or_insert_with(VecDeque::new);
+                buffer.push_back(BufferedOutput {
+                    data: data.clone(),
+                    timestamp,
+                });
+                while buffer.len() > MAX_BUFFERED_OUTPUTS {
+                    buffer.pop_front();
+                }
+
+                for (client_id, client) in state_guard.clients.iter() {
+                    if client.is_subscribed(&channel_name) {
+                        recipients.push(*client_id);
+                    }
+                }
+            }
+
+            // TODO: Maintain a subscription index to avoid scanning all clients on every output event.
             let msg = ServerMessage::Output {
                 channel: channel_name.clone(),
                 data,
-                timestamp: chrono::Utc::now().timestamp_millis(),
+                timestamp,
             };
-
             let state_read = state.read().await;
-            // TODO: Maintain a subscription index to avoid scanning all clients on every output event.
-            for client in state_read.clients.values() {
-                if client.is_subscribed(&channel_name) {
+            for client_id in recipients {
+                if let Some(client) = state_read.clients.get(&client_id) {
                     if let Err(e) = client.send(msg.clone()).await {
                         tracing::warn!("Failed to send output to client {}: {}", client.id(), e);
                     }
@@ -486,6 +588,127 @@ async fn handle_channel_event(event: ChannelManagerEvent, state: &Arc<RwLock<Ser
             if let Some(event) = server_event {
                 broadcast_to_clients(ServerMessage::Event(event), state).await;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::channel::ChannelConfig;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn sends_output_only_to_subscribers() {
+        let temp_dir = tempdir().unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let (client1_tx, mut client1_rx) = mpsc::channel(8);
+        let (client2_tx, mut client2_rx) = mpsc::channel(8);
+
+        let mut client1 = ClientConnection::new(client1_tx);
+        let client1_id = client1.id();
+        client1.subscribe(&["chan".to_string()]);
+
+        let client2 = ClientConnection::new(client2_tx);
+        let client2_id = client2.id();
+
+        let state = Arc::new(RwLock::new(ServerState {
+            session: Session::new("test".to_string(), temp_dir.path().join("sock")),
+            clients: HashMap::from([(client1_id, client1), (client2_id, client2)]),
+            channel_manager: ChannelManager::new(event_tx),
+            output_buffers: HashMap::new(),
+        }));
+
+        handle_channel_event(
+            ChannelManagerEvent::Output {
+                channel_name: "chan".to_string(),
+                data: b"hello".to_vec(),
+            },
+            &state,
+        )
+        .await;
+
+        let msg = client1_rx
+            .recv()
+            .await
+            .expect("client1 should receive output");
+        match msg {
+            ServerMessage::Output { channel, data, .. } => {
+                assert_eq!(channel, "chan");
+                assert_eq!(data, b"hello");
+            }
+            other => panic!("unexpected message for subscriber: {:?}", other),
+        }
+
+        assert!(
+            client2_rx.try_recv().is_err(),
+            "unsubscribe client should not receive output"
+        );
+    }
+
+    #[tokio::test]
+    async fn replays_buffer_on_subscribe() {
+        let temp_dir = tempdir().unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let (client_tx, mut client_rx) = mpsc::channel(16);
+        let client = ClientConnection::new(client_tx);
+        let client_id = client.id();
+
+        let state = Arc::new(RwLock::new(ServerState {
+            session: Session::new("test".to_string(), temp_dir.path().join("sock")),
+            clients: HashMap::from([(client_id, client)]),
+            channel_manager: ChannelManager::new(event_tx),
+            output_buffers: HashMap::new(),
+        }));
+
+        {
+            let mut guard = state.write().await;
+            guard
+                .channel_manager
+                .create_channel(ChannelConfig::new("chan").with_command("/bin/echo"))
+                .await
+                .unwrap();
+            guard
+                .output_buffers
+                .entry("chan".to_string())
+                .or_insert_with(VecDeque::new);
+        }
+
+        handle_channel_event(
+            ChannelManagerEvent::Output {
+                channel_name: "chan".to_string(),
+                data: b"missed".to_vec(),
+            },
+            &state,
+        )
+        .await;
+
+        // Subscribe after output was produced
+        let response = process_message(
+            ClientMessage::Subscribe {
+                channels: vec!["chan".to_string()],
+            },
+            client_id,
+            &state,
+        )
+        .await
+        .expect("subscribe should return response");
+
+        let output_msg = client_rx.recv().await.expect("buffered output delivered");
+        match output_msg {
+            ServerMessage::Output { channel, data, .. } => {
+                assert_eq!(channel, "chan");
+                assert_eq!(data, b"missed");
+            }
+            other => panic!("unexpected message: {:?}", other),
+        }
+
+        match response {
+            ServerMessage::Event(ChannelEvent::SubscriptionChanged { subscribed }) => {
+                assert_eq!(subscribed, vec!["chan".to_string()]);
+            }
+            other => panic!("unexpected response: {:?}", other),
         }
     }
 }
