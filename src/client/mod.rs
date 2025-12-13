@@ -222,11 +222,11 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     let mut subscriptions: Vec<String> = Vec::new();
     let mut should_exit = false;
 
-    // Redraw initially
+    // Redraw initially with full UI layout
     Renderer::clear(&mut std::io::stdout())?;
-    renderer.draw_status_bar(&mut std::io::stdout(), &channels, active_channel.as_deref())?;
-    renderer.draw_prompt(
+    renderer.draw_full_ui(
         &mut std::io::stdout(),
+        &channels,
         active_channel.as_deref(),
         &input_buffer,
     )?;
