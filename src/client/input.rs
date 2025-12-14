@@ -8,10 +8,10 @@ pub enum ParsedInput {
     /// Regular input to send to active channel
     Text(String),
 
-    /// Switch active channel: @channelname
+    /// Switch active channel: #channelname
     SwitchChannel(String),
 
-    /// Send to specific channel: @channel: command
+    /// Send to specific channel: #channel: command
     SendToChannel { channel: String, command: String },
 
     /// Control command: :command args
@@ -34,14 +34,14 @@ pub fn parse_input(line: &str) -> Result<ParsedInput> {
         return Ok(ParsedInput::ControlCommand { command, args });
     }
 
-    // Channel targeting: @channel or @channel: command
-    if let Some(rest) = line.strip_prefix('@') {
+    // Channel targeting: #channel or #channel: command (IRC/Slack convention)
+    if let Some(rest) = line.strip_prefix('#') {
         if let Some(colon_idx) = rest.find(':') {
             let channel = rest[..colon_idx].trim().to_string();
             let command = rest[colon_idx + 1..].trim().to_string();
             return Ok(ParsedInput::SendToChannel { channel, command });
         } else {
-            // Just @channel means switch to that channel
+            // Just #channel means switch to that channel
             let channel = rest.split_whitespace().next().unwrap_or(rest).to_string();
             return Ok(ParsedInput::SwitchChannel(channel));
         }
@@ -63,13 +63,13 @@ mod tests {
 
     #[test]
     fn test_parse_switch_channel() {
-        let result = parse_input("@build").unwrap();
+        let result = parse_input("#build").unwrap();
         assert!(matches!(result, ParsedInput::SwitchChannel(s) if s == "build"));
     }
 
     #[test]
     fn test_parse_send_to_channel() {
-        let result = parse_input("@build: npm run build").unwrap();
+        let result = parse_input("#build: npm run build").unwrap();
         assert!(matches!(
             result,
             ParsedInput::SendToChannel { channel, command }

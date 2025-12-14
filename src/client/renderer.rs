@@ -8,6 +8,7 @@
 //! Output is printed at the current cursor position within the output area,
 //! and after each output we redraw the prompt to keep it at the bottom.
 
+use chrono::{DateTime, Local};
 use crossterm::{
     cursor, execute, queue,
     style::{Color, Print, ResetColor, SetForegroundColor},
@@ -18,6 +19,13 @@ use std::io::{self, Write};
 use std::sync::LazyLock;
 
 use std::collections::{HashMap, HashSet};
+
+/// A buffered output line with timestamp
+#[derive(Clone)]
+struct BufferedLine {
+    content: String,
+    timestamp: DateTime<Local>,
+}
 
 /// Regex to match ANSI escape sequences (colors, cursor movement, etc.)
 static ANSI_ESCAPE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -82,7 +90,6 @@ pub struct Renderer {
     prompt_height: u16,
 
     /// Whether to show timestamps
-    #[allow(dead_code)]
     show_timestamps: bool,
 
     /// Map of channel names to colors
@@ -91,8 +98,8 @@ pub struct Renderer {
     /// Status bar position (top or bottom)
     status_bar_position: StatusBarPosition,
 
-    /// Per-channel output buffers
-    channel_buffers: HashMap<String, Vec<String>>,
+    /// Per-channel output buffers (with timestamps)
+    channel_buffers: HashMap<String, Vec<BufferedLine>>,
 
     /// Scroll offset per channel (0 = at bottom/most recent)
     scroll_offsets: HashMap<String, usize>,
@@ -106,8 +113,8 @@ pub struct Renderer {
     /// Current view mode
     view_mode: ViewMode,
 
-    /// Buffer for interleaved "all channels" view
-    interleaved_buffer: Vec<(String, String)>, // (channel, content)
+    /// Buffer for interleaved "all channels" view (channel, line)
+    interleaved_buffer: Vec<(String, BufferedLine)>,
 }
 
 impl Renderer {
@@ -164,6 +171,50 @@ impl Renderer {
         };
     }
 
+    /// Toggle timestamp display
+    pub fn toggle_timestamps(&mut self) {
+        self.show_timestamps = !self.show_timestamps;
+    }
+
+    /// Check if timestamps are enabled
+    pub fn timestamps_enabled(&self) -> bool {
+        self.show_timestamps
+    }
+
+    /// Determine if a click was on the status bar row
+    pub fn is_status_bar_click(&self, row: u16) -> bool {
+        row == self.status_bar_row()
+    }
+
+    /// Get the channel name at a given column position in the status bar
+    /// Returns None if the click wasn't on a channel segment
+    pub fn channel_at_position(&self, col: u16, channels: &[ChannelStatusInfo]) -> Option<String> {
+        // Rebuild the status bar segments to find positions
+        // Format: [mode] [#channel1] [#channel2] ...
+        let mut current_col = 0usize;
+
+        // Skip mode indicator (e.g., "[channel]" or "[all]")
+        let mode_indicator = match self.view_mode {
+            ViewMode::ActiveChannel => "[channel]",
+            ViewMode::AllChannels => "[all]",
+        };
+        current_col += mode_indicator.len() + 1; // +1 for space
+
+        for channel in channels {
+            let segment = format!("[#{}{}]", channel.name, channel.status_indicator());
+            let segment_start = current_col;
+            let segment_end = current_col + segment.len();
+
+            if col as usize >= segment_start && (col as usize) < segment_end {
+                return Some(channel.name.clone());
+            }
+
+            current_col = segment_end + 1; // +1 for space between segments
+        }
+
+        None
+    }
+
     /// Scroll up in the current channel
     pub fn scroll_up(&mut self, channel: Option<&str>, lines: usize) {
         if let Some(ch) = channel {
@@ -197,6 +248,18 @@ impl Renderer {
             .and_then(|ch| self.scroll_offsets.get(ch))
             .map(|&o| o > 0)
             .unwrap_or(false)
+    }
+
+    /// Get scroll position info: (offset, total_lines) for the current channel
+    pub fn scroll_position(&self, channel: Option<&str>) -> Option<(usize, usize)> {
+        let ch = channel?;
+        let offset = self.scroll_offsets.get(ch).copied().unwrap_or(0);
+        let total = self.channel_buffers.get(ch).map(|b| b.len()).unwrap_or(0);
+        if offset > 0 {
+            Some((offset, total))
+        } else {
+            None
+        }
     }
 
     /// Height available for output
@@ -300,10 +363,21 @@ impl Renderer {
             queue!(stdout, Print(segment))?;
         }
 
-        // Add scroll indicator if scrolled up
-        if self.is_scrolled(active_channel) {
+        // Add scroll indicator with position if scrolled up
+        if let Some((offset, total)) = self.scroll_position(active_channel) {
+            let visible = self.visible_output_rows();
+            // Calculate the line number at the top of the visible area
+            let top_line = total.saturating_sub(offset + visible);
+            let percent = if total > 0 {
+                ((total - offset) * 100) / total
+            } else {
+                100
+            };
             queue!(stdout, SetForegroundColor(Color::Yellow))?;
-            queue!(stdout, Print(" ↑scroll"))?;
+            queue!(
+                stdout,
+                Print(format!(" ↑ {}/{} ({}%)", top_line + 1, total, percent))
+            )?;
         }
 
         queue!(stdout, ResetColor)?;
@@ -322,10 +396,10 @@ impl Renderer {
         queue!(stdout, cursor::MoveTo(0, prompt_row))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
 
-        // Draw channel name with color
+        // Draw channel name with color (using # prefix for consistency)
         let channel_display = active_channel.unwrap_or("none");
         queue!(stdout, SetForegroundColor(Color::Cyan))?;
-        queue!(stdout, Print(format!("@{}", channel_display)))?;
+        queue!(stdout, Print(format!("#{}", channel_display)))?;
 
         // Draw prompt arrow
         queue!(stdout, SetForegroundColor(Color::Green))?;
@@ -554,14 +628,16 @@ impl Renderer {
             let end_idx = buffer_len.saturating_sub(scroll_offset);
             let start_idx = end_idx.saturating_sub(visible_rows);
 
-            let visible_lines: Vec<&str> = buffer[start_idx..end_idx]
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
+            let visible_lines: Vec<&BufferedLine> = buffer[start_idx..end_idx].iter().collect();
 
             for (i, line) in visible_lines.iter().enumerate() {
                 let row = start_row + i as u16;
-                self.draw_clean_line_at_row(stdout, row, line)?;
+                let display_content = if self.show_timestamps {
+                    format!("[{}] {}", line.timestamp.format("%H:%M:%S"), line.content)
+                } else {
+                    line.content.clone()
+                };
+                self.draw_clean_line_at_row(stdout, row, &display_content)?;
             }
         }
 
@@ -583,16 +659,21 @@ impl Renderer {
         let buffer_len = self.interleaved_buffer.len();
         let skip_count = buffer_len.saturating_sub(visible_rows);
 
-        let visible_lines: Vec<(String, String)> = self
+        let visible_lines: Vec<(String, BufferedLine)> = self
             .interleaved_buffer
             .iter()
             .skip(skip_count)
             .cloned()
             .collect();
 
-        for (i, (channel, content)) in visible_lines.iter().enumerate() {
+        for (i, (channel, line)) in visible_lines.iter().enumerate() {
             let row = start_row + i as u16;
-            self.draw_prefixed_line_at_row(stdout, row, channel, content)?;
+            let display_content = if self.show_timestamps {
+                format!("[{}] {}", line.timestamp.format("%H:%M:%S"), line.content)
+            } else {
+                line.content.clone()
+            };
+            self.draw_prefixed_line_at_row(stdout, row, channel, &display_content)?;
         }
 
         Ok(())
@@ -634,12 +715,18 @@ impl Renderer {
         // Hide welcome tips once we have actual output
         self.show_welcome = false;
 
+        // Create buffered line with current timestamp
+        let buffered_line = BufferedLine {
+            content: line.to_string(),
+            timestamp: Local::now(),
+        };
+
         // Add to channel-specific buffer
         let buffer = self
             .channel_buffers
             .entry(channel_name.to_string())
             .or_default();
-        buffer.push(line.to_string());
+        buffer.push(buffered_line.clone());
 
         // Trim buffer if it exceeds max size
         if buffer.len() > self.max_buffer_lines {
@@ -649,7 +736,7 @@ impl Renderer {
 
         // Also add to interleaved buffer for "all channels" view
         self.interleaved_buffer
-            .push((channel_name.to_string(), line.to_string()));
+            .push((channel_name.to_string(), buffered_line));
         if self.interleaved_buffer.len() > self.max_buffer_lines {
             let excess = self.interleaved_buffer.len() - self.max_buffer_lines;
             self.interleaved_buffer.drain(0..excess);
@@ -681,13 +768,18 @@ impl Renderer {
         }
     }
 
-    /// Enter raw mode for terminal
+    /// Enter raw mode for terminal with mouse support
     pub fn enter_raw_mode() -> io::Result<()> {
-        terminal::enable_raw_mode()
+        terminal::enable_raw_mode()?;
+        // Enable mouse capture for click and scroll events
+        execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
+        Ok(())
     }
 
-    /// Exit raw mode
+    /// Exit raw mode and disable mouse capture
     pub fn exit_raw_mode() -> io::Result<()> {
+        // Disable mouse capture before exiting raw mode
+        execute!(io::stdout(), crossterm::event::DisableMouseCapture)?;
         terminal::disable_raw_mode()
     }
 
@@ -772,7 +864,8 @@ pub struct ChannelStatusInfo {
 }
 
 impl ChannelStatusInfo {
-    fn status_indicator(&self) -> &'static str {
+    /// Get the status indicator string for this channel
+    pub fn status_indicator(&self) -> &'static str {
         if !self.running {
             if let Some(code) = self.exit_code {
                 if code == 0 {
