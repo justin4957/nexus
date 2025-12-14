@@ -959,6 +959,19 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                                     &format!("Completions: {}", completion_list),
                                                     active_channel.as_deref(),
                                                 )?;
+                                                // Redraw status bar after showing completions
+                                                renderer.draw_status_bar(
+                                                    &mut std::io::stdout(),
+                                                    &channels,
+                                                    active_channel.as_deref(),
+                                                )?;
+                                                // Redraw prompt to restore cursor position
+                                                renderer.draw_prompt(
+                                                    &mut std::io::stdout(),
+                                                    active_channel.as_deref(),
+                                                    line_editor.content(),
+                                                    line_editor.cursor_position(),
+                                                )?;
                                             }
                                         }
                                     }
