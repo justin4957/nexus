@@ -1,0 +1,166 @@
+//! Tab completion for commands and channel names
+
+/// Available control commands for completion
+pub const COMMANDS: &[&str] = &[
+    "new",
+    "kill",
+    "list",
+    "status",
+    "sub",
+    "unsub",
+    "subs",
+    "clear",
+    "view",
+    "timestamps",
+    "help",
+    "quit",
+    "exit",
+];
+
+/// Complete a partial input string
+/// Returns a list of possible completions
+pub fn complete(input: &str, channel_names: &[String]) -> Vec<String> {
+    let input = input.trim();
+
+    // Command completion: :cmd
+    if let Some(partial_cmd) = input.strip_prefix(':') {
+        // Check if there's a space (completing an argument)
+        if let Some(space_idx) = partial_cmd.find(' ') {
+            let cmd = &partial_cmd[..space_idx];
+            let arg_partial = partial_cmd[space_idx..].trim();
+
+            // Commands that take channel names as arguments
+            if matches!(cmd, "kill" | "sub" | "unsub") {
+                return complete_channel_arg(input, arg_partial, channel_names);
+            }
+            return vec![];
+        }
+
+        // Completing the command name itself
+        return complete_command(partial_cmd);
+    }
+
+    // Channel completion: #channel
+    if let Some(partial_channel) = input.strip_prefix('#') {
+        return complete_channel(partial_channel, channel_names);
+    }
+
+    vec![]
+}
+
+/// Complete a command name
+fn complete_command(partial: &str) -> Vec<String> {
+    let partial_lower = partial.to_lowercase();
+    COMMANDS
+        .iter()
+        .filter(|cmd| cmd.starts_with(&partial_lower))
+        .map(|cmd| format!(":{}", cmd))
+        .collect()
+}
+
+/// Complete a channel name
+fn complete_channel(partial: &str, channel_names: &[String]) -> Vec<String> {
+    let partial_lower = partial.to_lowercase();
+    channel_names
+        .iter()
+        .filter(|name| name.to_lowercase().starts_with(&partial_lower))
+        .map(|name| format!("#{}", name))
+        .collect()
+}
+
+/// Complete a channel argument for a command
+fn complete_channel_arg(
+    full_input: &str,
+    partial_arg: &str,
+    channel_names: &[String],
+) -> Vec<String> {
+    let partial_lower = partial_arg.to_lowercase();
+    let prefix = if let Some(space_idx) = full_input.find(' ') {
+        &full_input[..=space_idx]
+    } else {
+        full_input
+    };
+
+    channel_names
+        .iter()
+        .filter(|name| name.to_lowercase().starts_with(&partial_lower))
+        .map(|name| format!("{}{}", prefix, name))
+        .collect()
+}
+
+/// Get the common prefix of all completions
+pub fn common_prefix(completions: &[String]) -> Option<String> {
+    if completions.is_empty() {
+        return None;
+    }
+    if completions.len() == 1 {
+        return Some(completions[0].clone());
+    }
+
+    let first = &completions[0];
+    let mut prefix_len = first.len();
+
+    for completion in &completions[1..] {
+        let common_len = first
+            .chars()
+            .zip(completion.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        prefix_len = prefix_len.min(common_len);
+    }
+
+    if prefix_len > 0 {
+        Some(first.chars().take(prefix_len).collect())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_complete_command() {
+        let channels = vec![];
+        let completions = complete(":ne", &channels);
+        assert_eq!(completions, vec![":new"]);
+    }
+
+    #[test]
+    fn test_complete_command_multiple() {
+        let channels = vec![];
+        let completions = complete(":s", &channels);
+        assert!(completions.contains(&":status".to_string()));
+        assert!(completions.contains(&":sub".to_string()));
+        assert!(completions.contains(&":subs".to_string()));
+    }
+
+    #[test]
+    fn test_complete_channel() {
+        let channels = vec![
+            "shell".to_string(),
+            "build".to_string(),
+            "server".to_string(),
+        ];
+        let completions = complete("#sh", &channels);
+        assert_eq!(completions, vec!["#shell"]);
+    }
+
+    #[test]
+    fn test_complete_channel_arg() {
+        let channels = vec!["shell".to_string(), "build".to_string()];
+        let completions = complete(":kill sh", &channels);
+        assert_eq!(completions, vec![":kill shell"]);
+    }
+
+    #[test]
+    fn test_common_prefix() {
+        let completions = vec![
+            ":status".to_string(),
+            ":sub".to_string(),
+            ":subs".to_string(),
+        ];
+        assert_eq!(common_prefix(&completions), Some(":s".to_string()));
+    }
+}
