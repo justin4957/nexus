@@ -1,6 +1,7 @@
 //! Client - user-facing terminal interface
 
 mod commands;
+mod completion;
 mod input;
 mod renderer;
 
@@ -11,7 +12,7 @@ use crate::config::Config;
 use crate::protocol::{ChannelEvent, ClientMessage, ServerMessage};
 use crate::server::connection::{read_message, write_message};
 use anyhow::{anyhow, Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -730,6 +731,67 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                         )?;
                         continue;
                     }
+                    // Handle mouse events (Issue #34)
+                    Event::Mouse(mouse_event) => {
+                        match mouse_event.kind {
+                            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                                // Check if click was on status bar
+                                if renderer.is_status_bar_click(mouse_event.row) {
+                                    // Check if we clicked on a channel
+                                    if let Some(channel_name) =
+                                        renderer.channel_at_position(mouse_event.column, &channels)
+                                    {
+                                        // Switch to the clicked channel
+                                        msg_tx
+                                            .send(ClientMessage::SwitchChannel {
+                                                name: channel_name,
+                                            })
+                                            .await?;
+                                    }
+                                }
+                            }
+                            MouseEventKind::ScrollUp => {
+                                // Scroll output up by 3 lines
+                                renderer.scroll_up(active_channel.as_deref(), 3);
+                                renderer.redraw_output_area(
+                                    &mut std::io::stdout(),
+                                    active_channel.as_deref(),
+                                )?;
+                                renderer.draw_status_bar(
+                                    &mut std::io::stdout(),
+                                    &channels,
+                                    active_channel.as_deref(),
+                                )?;
+                                renderer.draw_prompt(
+                                    &mut std::io::stdout(),
+                                    active_channel.as_deref(),
+                                    line_editor.content(),
+                                    line_editor.cursor_position(),
+                                )?;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                // Scroll output down by 3 lines
+                                renderer.scroll_down(active_channel.as_deref(), 3);
+                                renderer.redraw_output_area(
+                                    &mut std::io::stdout(),
+                                    active_channel.as_deref(),
+                                )?;
+                                renderer.draw_status_bar(
+                                    &mut std::io::stdout(),
+                                    &channels,
+                                    active_channel.as_deref(),
+                                )?;
+                                renderer.draw_prompt(
+                                    &mut std::io::stdout(),
+                                    active_channel.as_deref(),
+                                    line_editor.content(),
+                                    line_editor.cursor_position(),
+                                )?;
+                            }
+                            _ => {} // Ignore other mouse events
+                        }
+                        continue;
+                    }
                     Event::Key(key) => {
                         // Handle scrolling and view mode when input is empty
                         if line_editor.is_empty()
@@ -869,6 +931,47 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                 if let Some(cmd) = channel_history.down() {
                                     line_editor.set(cmd);
                                 }
+                            }
+                            KeyCode::Tab => {
+                                // Tab completion for commands and channel names
+                                if !line_editor.is_empty() {
+                                    let channel_names: Vec<String> =
+                                        channels.iter().map(|c| c.name.clone()).collect();
+                                    let completions =
+                                        completion::complete(line_editor.content(), &channel_names);
+
+                                    if completions.len() == 1 {
+                                        // Single match - complete it
+                                        line_editor.set(&completions[0]);
+                                    } else if !completions.is_empty() {
+                                        // Multiple matches - try to extend common prefix first
+                                        let mut extended = false;
+                                        if let Some(prefix) =
+                                            completion::common_prefix(&completions)
+                                        {
+                                            if prefix.len() > line_editor.content().len() {
+                                                line_editor.set(&prefix);
+                                                extended = true;
+                                            }
+                                        }
+                                        // Show completions if we couldn't extend
+                                        if !extended {
+                                            // Show completions directly on line above prompt
+                                            renderer.show_completions(
+                                                &mut std::io::stdout(),
+                                                &completions,
+                                            )?;
+                                            // Redraw prompt to restore cursor position
+                                            renderer.draw_prompt(
+                                                &mut std::io::stdout(),
+                                                active_channel.as_deref(),
+                                                line_editor.content(),
+                                                line_editor.cursor_position(),
+                                            )?;
+                                        }
+                                    }
+                                }
+                                // When input is empty, Tab is handled by scroll_keys (view toggle)
                             }
                             KeyCode::Enter => {
                                 let input_content = line_editor.take();

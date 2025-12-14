@@ -176,6 +176,21 @@ pub async fn handle_control_command(
             }
             renderer.redraw_output_area(&mut stdout, active)?;
         }
+        "timestamps" | "ts" => {
+            renderer.toggle_timestamps();
+            let status = if renderer.timestamps_enabled() {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                &format!("Timestamps: {}", status),
+                active,
+            )?;
+            renderer.redraw_output_area(&mut stdout, active)?;
+        }
         "help" | "?" => {
             renderer.draw_output_line(
                 &mut stdout,
@@ -242,6 +257,12 @@ pub async fn handle_control_command(
             renderer.draw_output_line(
                 &mut stdout,
                 "SYSTEM",
+                "  :timestamps         Toggle timestamp display (:ts)",
+                active,
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
                 "  :quit               Exit nexus",
                 active,
             )?;
@@ -282,7 +303,7 @@ pub async fn handle_control_command(
             renderer.draw_output_line(
                 &mut stdout,
                 "SYSTEM",
-                "  Tab                 Toggle view mode (channel/all)",
+                "  Tab                 Complete command/channel (toggle view if empty)",
                 active,
             )?;
             renderer.draw_output_line(&mut stdout, "SYSTEM", "", active)?;
@@ -335,6 +356,20 @@ pub async fn handle_control_command(
                 &mut stdout,
                 "SYSTEM",
                 "  Ctrl+\\              Exit nexus immediately",
+                active,
+            )?;
+            renderer.draw_output_line(&mut stdout, "SYSTEM", "", active)?;
+            renderer.draw_output_line(&mut stdout, "SYSTEM", "Mouse:", active)?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Click channel       Switch to clicked channel in status bar",
+                active,
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Scroll wheel        Scroll output up/down",
                 active,
             )?;
         }
