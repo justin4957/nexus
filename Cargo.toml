@@ -15,6 +15,7 @@ tokio = { version = "1.35", features = ["full"] }
 
 # Terminal handling
 crossterm = "0.27"
+ratatui = "0.29"
 
 # PTY management
 portable-pty = "0.8"
