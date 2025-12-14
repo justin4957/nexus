@@ -943,36 +943,39 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                     if completions.len() == 1 {
                                         // Single match - complete it
                                         line_editor.set(&completions[0]);
-                                    } else if completions.len() > 1 {
-                                        // Multiple matches - complete common prefix and show options
+                                    } else if !completions.is_empty() {
+                                        // Multiple matches - try to extend common prefix first
+                                        let mut extended = false;
                                         if let Some(prefix) =
                                             completion::common_prefix(&completions)
                                         {
                                             if prefix.len() > line_editor.content().len() {
                                                 line_editor.set(&prefix);
-                                            } else {
-                                                // Show completions in output
-                                                let completion_list = completions.join("  ");
-                                                renderer.draw_output_line(
-                                                    &mut std::io::stdout(),
-                                                    "SYSTEM",
-                                                    &format!("Completions: {}", completion_list),
-                                                    active_channel.as_deref(),
-                                                )?;
-                                                // Redraw status bar after showing completions
-                                                renderer.draw_status_bar(
-                                                    &mut std::io::stdout(),
-                                                    &channels,
-                                                    active_channel.as_deref(),
-                                                )?;
-                                                // Redraw prompt to restore cursor position
-                                                renderer.draw_prompt(
-                                                    &mut std::io::stdout(),
-                                                    active_channel.as_deref(),
-                                                    line_editor.content(),
-                                                    line_editor.cursor_position(),
-                                                )?;
+                                                extended = true;
                                             }
+                                        }
+                                        // Show completions if we couldn't extend
+                                        if !extended {
+                                            let completion_list = completions.join("  ");
+                                            renderer.draw_output_line(
+                                                &mut std::io::stdout(),
+                                                "SYSTEM",
+                                                &format!("Completions: {}", completion_list),
+                                                active_channel.as_deref(),
+                                            )?;
+                                            // Redraw status bar after showing completions
+                                            renderer.draw_status_bar(
+                                                &mut std::io::stdout(),
+                                                &channels,
+                                                active_channel.as_deref(),
+                                            )?;
+                                            // Redraw prompt to restore cursor position
+                                            renderer.draw_prompt(
+                                                &mut std::io::stdout(),
+                                                active_channel.as_deref(),
+                                                line_editor.content(),
+                                                line_editor.cursor_position(),
+                                            )?;
                                         }
                                     }
                                 }
