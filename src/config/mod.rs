@@ -11,6 +11,7 @@ pub struct Config {
     pub general: GeneralConfig,
     pub appearance: AppearanceConfig,
     pub keybindings: KeybindingsConfig,
+    pub notifications: NotificationsConfig,
 }
 
 /// General settings
@@ -49,6 +50,12 @@ pub struct AppearanceConfig {
 
     /// Color-code channels
     pub channel_colors: bool,
+
+    /// Line wrapping mode: true = wrap long lines, false = truncate with ellipsis
+    pub line_wrap: bool,
+
+    /// Show channel numbers in status bar for Alt+N shortcuts
+    pub show_channel_numbers: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -57,6 +64,8 @@ impl Default for AppearanceConfig {
             status_bar_position: StatusBarPosition::Top,
             show_timestamps: false,
             channel_colors: true,
+            line_wrap: true,
+            show_channel_numbers: true,
         }
     }
 }
@@ -85,6 +94,30 @@ impl Default for KeybindingsConfig {
             next_channel: "ctrl+n".to_string(),
             prev_channel: "ctrl+p".to_string(),
             clear_screen: "ctrl+l".to_string(),
+        }
+    }
+}
+
+/// Notification settings for background channel activity
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationsConfig {
+    /// Enable terminal bell on new output in background channels
+    pub bell: bool,
+
+    /// Update terminal title with active channel and new output indicators
+    pub title_update: bool,
+
+    /// Minimum seconds between notifications per channel (cooldown)
+    pub cooldown_seconds: u64,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            bell: false,
+            title_update: true,
+            cooldown_seconds: 1,
         }
     }
 }

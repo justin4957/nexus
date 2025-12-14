@@ -463,7 +463,15 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
 
     // Setup UI with config-based status bar position
     let mut renderer = Renderer::with_position(config.appearance.status_bar_position)?;
+    renderer.set_line_wrap(config.appearance.line_wrap);
+    renderer.set_show_channel_numbers(config.appearance.show_channel_numbers);
     Renderer::enter_raw_mode()?;
+
+    // Notification settings
+    let notify_bell = config.notifications.bell;
+    let notify_title = config.notifications.title_update;
+    let notify_cooldown = std::time::Duration::from_secs(config.notifications.cooldown_seconds);
+    let mut last_notification: HashMap<String, std::time::Instant> = HashMap::new();
 
     // Channels for communication
     let (input_tx, mut input_rx) = mpsc::channel(100);
@@ -534,6 +542,12 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
         line_editor.cursor_position(),
     )?;
 
+    // Set initial terminal title if enabled
+    if notify_title {
+        let _ =
+            Renderer::update_terminal_title(&mut std::io::stdout(), active_channel.as_deref(), &[]);
+    }
+
     // Main loop
     loop {
         tokio::select! {
@@ -571,10 +585,41 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                         }
                     }
                     ServerMessage::Output { channel, data, .. } => {
-                        // Mark channel as having output
+                        // Mark channel as having output and handle notifications
+                        let is_background = Some(channel.as_str()) != active_channel.as_deref();
                         if let Some(c) = channels.iter_mut().find(|c| c.name == channel) {
-                            if Some(channel.as_str()) != active_channel.as_deref() {
+                            if is_background {
                                 c.has_new_output = true;
+
+                                // Check notification cooldown
+                                let now = std::time::Instant::now();
+                                let should_notify = last_notification
+                                    .get(&channel)
+                                    .map(|&last| now.duration_since(last) >= notify_cooldown)
+                                    .unwrap_or(true);
+
+                                if should_notify {
+                                    last_notification.insert(channel.clone(), now);
+
+                                    // Ring terminal bell if enabled
+                                    if notify_bell {
+                                        let _ = Renderer::ring_bell(&mut std::io::stdout());
+                                    }
+
+                                    // Update terminal title if enabled
+                                    if notify_title {
+                                        let channels_with_output: Vec<&str> = channels
+                                            .iter()
+                                            .filter(|ch| ch.has_new_output)
+                                            .map(|ch| ch.name.as_str())
+                                            .collect();
+                                        let _ = Renderer::update_terminal_title(
+                                            &mut std::io::stdout(),
+                                            active_channel.as_deref(),
+                                            &channels_with_output,
+                                        );
+                                    }
+                                }
                             }
                         }
 
@@ -678,6 +723,20 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                 }
                                 // Redraw output for the new active channel
                                 renderer.redraw_output_area(&mut std::io::stdout(), active_channel.as_deref())?;
+
+                                // Update terminal title if enabled
+                                if notify_title {
+                                    let channels_with_output: Vec<&str> = channels
+                                        .iter()
+                                        .filter(|ch| ch.has_new_output)
+                                        .map(|ch| ch.name.as_str())
+                                        .collect();
+                                    let _ = Renderer::update_terminal_title(
+                                        &mut std::io::stdout(),
+                                        active_channel.as_deref(),
+                                        &channels_with_output,
+                                    );
+                                }
                             }
                             ChannelEvent::SubscriptionChanged { subscribed } => {
                                 subscriptions = subscribed.clone();
@@ -820,7 +879,21 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
 
                         match key.code {
                             KeyCode::Char(c) => {
-                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                // Alt+1-9 for quick channel switching
+                                if key.modifiers.contains(KeyModifiers::ALT) {
+                                    if let Some(digit) = c.to_digit(10) {
+                                        if (1..=9).contains(&digit) {
+                                            let idx = (digit - 1) as usize;
+                                            if let Some(channel) = channels.get(idx) {
+                                                msg_tx
+                                                    .send(ClientMessage::SwitchChannel {
+                                                        name: channel.name.clone(),
+                                                    })
+                                                    .await?;
+                                            }
+                                        }
+                                    }
+                                } else if key.modifiers.contains(KeyModifiers::CONTROL) {
                                     match c {
                                         'c' => {
                                             if line_editor.is_empty() {
@@ -897,10 +970,46 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                 line_editor.delete();
                             }
                             KeyCode::Left => {
-                                line_editor.move_left();
+                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    // Ctrl+Left: switch to previous channel
+                                    if let Some(current) = &active_channel {
+                                        if let Some(idx) = channels.iter().position(|c| &c.name == current) {
+                                            let prev_idx = if idx == 0 {
+                                                channels.len().saturating_sub(1)
+                                            } else {
+                                                idx - 1
+                                            };
+                                            if let Some(prev_channel) = channels.get(prev_idx) {
+                                                msg_tx
+                                                    .send(ClientMessage::SwitchChannel {
+                                                        name: prev_channel.name.clone(),
+                                                    })
+                                                    .await?;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    line_editor.move_left();
+                                }
                             }
                             KeyCode::Right => {
-                                line_editor.move_right();
+                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    // Ctrl+Right: switch to next channel
+                                    if let Some(current) = &active_channel {
+                                        if let Some(idx) = channels.iter().position(|c| &c.name == current) {
+                                            let next_idx = (idx + 1) % channels.len().max(1);
+                                            if let Some(next_channel) = channels.get(next_idx) {
+                                                msg_tx
+                                                    .send(ClientMessage::SwitchChannel {
+                                                        name: next_channel.name.clone(),
+                                                    })
+                                                    .await?;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    line_editor.move_right();
+                                }
                             }
                             KeyCode::Home => {
                                 if !line_editor.is_empty() {

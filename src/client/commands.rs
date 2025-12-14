@@ -280,6 +280,18 @@ pub async fn handle_control_command(
                 "  #<name> <cmd>       Send command to channel without switching",
                 active,
             )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Alt+1-9             Quick switch to channel by number",
+                active,
+            )?;
+            renderer.draw_output_line(
+                &mut stdout,
+                "SYSTEM",
+                "  Ctrl+Left/Right     Switch to previous/next channel",
+                active,
+            )?;
             renderer.draw_output_line(&mut stdout, "SYSTEM", "", active)?;
             renderer.draw_output_line(&mut stdout, "SYSTEM", "Scrolling:", active)?;
             renderer.draw_output_line(
