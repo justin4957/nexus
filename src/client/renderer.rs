@@ -115,6 +115,12 @@ pub struct Renderer {
 
     /// Buffer for interleaved "all channels" view (channel, line)
     interleaved_buffer: Vec<(String, BufferedLine)>,
+
+    /// Line wrapping mode: true = wrap, false = truncate with ellipsis
+    line_wrap: bool,
+
+    /// Show channel numbers in status bar
+    show_channel_numbers: bool,
 }
 
 impl Renderer {
@@ -140,7 +146,56 @@ impl Renderer {
             show_welcome: true,
             view_mode: ViewMode::ActiveChannel,
             interleaved_buffer: Vec::new(),
+            line_wrap: true,
+            show_channel_numbers: true,
         })
+    }
+
+    /// Set line wrapping mode
+    pub fn set_line_wrap(&mut self, wrap: bool) {
+        self.line_wrap = wrap;
+    }
+
+    /// Set whether to show channel numbers
+    pub fn set_show_channel_numbers(&mut self, show: bool) {
+        self.show_channel_numbers = show;
+    }
+
+    /// Set terminal title using OSC escape sequence
+    pub fn set_terminal_title(stdout: &mut impl Write, title: &str) -> io::Result<()> {
+        // OSC 0 ; title BEL - sets both icon name and window title
+        write!(stdout, "\x1b]0;{}\x07", title)?;
+        stdout.flush()
+    }
+
+    /// Update terminal title with active channel and new output indicators
+    pub fn update_terminal_title(
+        stdout: &mut impl Write,
+        active_channel: Option<&str>,
+        channels_with_new_output: &[&str],
+    ) -> io::Result<()> {
+        let mut title = String::from("nexus");
+
+        if let Some(active) = active_channel {
+            title.push_str(&format!(": #{}", active));
+        }
+
+        if !channels_with_new_output.is_empty() {
+            let new_list = channels_with_new_output
+                .iter()
+                .map(|s| format!("#{}", s))
+                .collect::<Vec<_>>()
+                .join(", ");
+            title.push_str(&format!(" | new: {}", new_list));
+        }
+
+        Self::set_terminal_title(stdout, &title)
+    }
+
+    /// Ring the terminal bell
+    pub fn ring_bell(stdout: &mut impl Write) -> io::Result<()> {
+        write!(stdout, "\x07")?;
+        stdout.flush()
     }
 
     /// Update terminal size
@@ -303,7 +358,7 @@ impl Renderer {
         segments.push((mode_indicator.to_string(), Color::DarkGrey));
         total_width += mode_indicator.len() + 1;
 
-        for channel in channels {
+        for (idx, channel) in channels.iter().enumerate() {
             let color = if Some(channel.name.as_str()) == active_channel {
                 Color::Green
             } else if channel.has_new_output {
@@ -320,7 +375,17 @@ impl Renderer {
                 Color::DarkGrey
             };
 
-            let segment = format!("[#{}{}]", channel.name, channel.status_indicator());
+            // Show channel number for Alt+N shortcuts (1-9 only)
+            let segment = if self.show_channel_numbers && idx < 9 {
+                format!(
+                    "[{}:#{}{}]",
+                    idx + 1,
+                    channel.name,
+                    channel.status_indicator()
+                )
+            } else {
+                format!("[#{}{}]", channel.name, channel.status_indicator())
+            };
             let segment_width = segment.len() + 1; // +1 for space separator
 
             // Check if adding this segment would exceed terminal width
@@ -504,7 +569,12 @@ impl Renderer {
 
         // Write content directly to preserve ANSI escape sequences
         if visible_len > max_line_len && max_line_len > 0 {
-            let display_line = truncate_with_ansi(content, max_line_len);
+            // Use ellipsis when not wrapping, regular truncation otherwise
+            let display_line = if self.line_wrap {
+                truncate_with_ansi(content, max_line_len)
+            } else {
+                truncate_with_ellipsis(content, max_line_len)
+            };
             stdout.write_all(display_line.as_bytes())?;
         } else {
             stdout.write_all(content.as_bytes())?;
@@ -546,7 +616,12 @@ impl Renderer {
 
         // Write content directly to preserve ANSI escape sequences
         if visible_len > max_line_len && max_line_len > 0 {
-            let display_line = truncate_with_ansi(content, max_line_len);
+            // Use ellipsis when not wrapping, regular truncation otherwise
+            let display_line = if self.line_wrap {
+                truncate_with_ansi(content, max_line_len)
+            } else {
+                truncate_with_ellipsis(content, max_line_len)
+            };
             stdout.write_all(display_line.as_bytes())?;
         } else {
             stdout.write_all(content.as_bytes())?;
@@ -873,6 +948,8 @@ impl Default for Renderer {
             show_welcome: true,
             view_mode: ViewMode::ActiveChannel,
             interleaved_buffer: Vec::new(),
+            line_wrap: true,
+            show_channel_numbers: true,
         })
     }
 }
@@ -908,9 +985,26 @@ impl ChannelStatusInfo {
 /// Truncate a string with ANSI codes to a maximum visible length.
 /// Preserves ANSI escape sequences while counting only visible characters.
 fn truncate_with_ansi(s: &str, max_visible_len: usize) -> String {
+    truncate_with_ansi_internal(s, max_visible_len, false)
+}
+
+/// Truncate a string with ANSI codes and add ellipsis indicator.
+fn truncate_with_ellipsis(s: &str, max_visible_len: usize) -> String {
+    truncate_with_ansi_internal(s, max_visible_len, true)
+}
+
+/// Internal truncation function with optional ellipsis.
+fn truncate_with_ansi_internal(s: &str, max_visible_len: usize, add_ellipsis: bool) -> String {
     let mut result = String::new();
     let mut visible_count = 0;
     let mut chars = s.chars().peekable();
+    // Reserve space for ellipsis if needed
+    let effective_max = if add_ellipsis {
+        max_visible_len.saturating_sub(1)
+    } else {
+        max_visible_len
+    };
+    let mut was_truncated = false;
 
     while let Some(c) = chars.next() {
         if c == '\x1b' {
@@ -926,12 +1020,18 @@ fn truncate_with_ansi(s: &str, max_visible_len: usize) -> String {
             }
         } else {
             // Regular visible character
-            if visible_count >= max_visible_len {
+            if visible_count >= effective_max {
+                was_truncated = true;
                 break;
             }
             result.push(c);
             visible_count += 1;
         }
+    }
+
+    // Add ellipsis if truncated and requested
+    if add_ellipsis && was_truncated {
+        result.push('…');
     }
 
     // Add reset sequence to ensure colors don't bleed
