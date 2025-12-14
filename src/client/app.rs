@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Local};
 use ratatui::style::Color;
+use std::collections::{HashMap, HashSet};
 // actually we should define it here or in a types module. Let's redefine it here and update mod.rs to use this one.
 
 pub struct ChannelInfo {
@@ -234,7 +234,7 @@ impl App {
 
     pub fn add_output(&mut self, channel: String, text: String) {
         self.show_welcome = false;
-        
+
         let buffered_line = BufferedLine {
             content: text,
             timestamp: Local::now(),
@@ -247,7 +247,8 @@ impl App {
             buffer.drain(0..excess);
         }
 
-        self.interleaved_buffer.push((channel.clone(), buffered_line));
+        self.interleaved_buffer
+            .push((channel.clone(), buffered_line));
         if self.interleaved_buffer.len() > self.max_buffer_lines {
             let excess = self.interleaved_buffer.len() - self.max_buffer_lines;
             self.interleaved_buffer.drain(0..excess);
@@ -260,9 +261,10 @@ impl App {
     }
 
     pub fn is_scrolled(&self, channel: Option<&str>) -> bool {
-        channel.and_then(|ch| self.scroll_offsets.get(ch))
-               .map(|&o| o > 0)
-               .unwrap_or(false)
+        channel
+            .and_then(|ch| self.scroll_offsets.get(ch))
+            .map(|&o| o > 0)
+            .unwrap_or(false)
     }
 
     pub fn scroll_up(&mut self, lines: usize) {
@@ -277,13 +279,13 @@ impl App {
             // approximate visible rows - exact value available in draw, but logic needs it here.
             // We can store viewport height in App or just clamp to buffer len.
             // Clamping to buffer len is safe.
-             let offset = self.scroll_offsets.entry(ch.to_string()).or_insert(0);
-             *offset = (*offset + lines).min(buffer_len.saturating_sub(1));
+            let offset = self.scroll_offsets.entry(ch.to_string()).or_insert(0);
+            *offset = (*offset + lines).min(buffer_len.saturating_sub(1));
         }
     }
 
     pub fn scroll_down(&mut self, lines: usize) {
-         if let Some(ch) = self.active_channel.as_deref() {
+        if let Some(ch) = self.active_channel.as_deref() {
             let offset = self.scroll_offsets.entry(ch.to_string()).or_insert(0);
             *offset = offset.saturating_sub(lines);
         }
@@ -294,26 +296,36 @@ impl App {
             self.scroll_offsets.insert(ch.to_string(), 0);
         }
     }
-    
+
     pub fn get_channel_color(&mut self, channel: &str) -> Color {
         if let Some(c) = self.channel_colors.get(channel) {
             return *c;
         }
-        
+
         // Simple color rotation
         let colors = [
-            Color::Blue, Color::Magenta, Color::Cyan, Color::Yellow, Color::Green, Color::Red
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::Yellow,
+            Color::Green,
+            Color::Red,
         ];
-        
+
         let used: HashSet<_> = self.channel_colors.values().copied().collect();
-        let color = *colors.iter().find(|c| !used.contains(c)).unwrap_or(&colors[self.channel_colors.len() % colors.len()]);
-        
+        let color = *colors
+            .iter()
+            .find(|c| !used.contains(c))
+            .unwrap_or(&colors[self.channel_colors.len() % colors.len()]);
+
         self.channel_colors.insert(channel.to_string(), color);
         color
     }
 
     pub fn next_channel(&mut self) {
-        if self.channels.is_empty() { return; }
+        if self.channels.is_empty() {
+            return;
+        }
         if let Some(curr) = &self.active_channel {
             if let Some(idx) = self.channels.iter().position(|c| &c.name == curr) {
                 let next = (idx + 1) % self.channels.len();
@@ -325,14 +337,20 @@ impl App {
     }
 
     pub fn prev_channel(&mut self) {
-        if self.channels.is_empty() { return; }
+        if self.channels.is_empty() {
+            return;
+        }
         if let Some(curr) = &self.active_channel {
             if let Some(idx) = self.channels.iter().position(|c| &c.name == curr) {
-                let prev = if idx == 0 { self.channels.len() - 1 } else { idx - 1 };
+                let prev = if idx == 0 {
+                    self.channels.len() - 1
+                } else {
+                    idx - 1
+                };
                 self.active_channel = Some(self.channels[prev].name.clone());
             }
         } else {
-             self.active_channel = Some(self.channels[0].name.clone());
+            self.active_channel = Some(self.channels[0].name.clone());
         }
     }
 }

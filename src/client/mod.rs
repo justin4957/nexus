@@ -18,10 +18,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -130,7 +127,7 @@ pub async fn start_new_session(name: &str) -> Result<()> {
         Err(_) => {
             // Spawn server
             println!("nexus: spawning server for session '{}'...", name);
-            let exe = std::env::current_exe()? 
+            let exe = std::env::current_exe()?
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .join("nexus-server");
@@ -192,7 +189,7 @@ pub async fn list_sessions() -> Result<()> {
 
     if !runtime_dir.exists() {
         println!("No sessions found.");
-        return Ok(())
+        return Ok(());
     }
 
     let mut found = false;
@@ -249,7 +246,7 @@ pub async fn attach_or_create(name: &str) -> Result<()> {
 fn handle_scroll_keys(key: &KeyEvent, app: &mut App) -> bool {
     // Determine visible rows (approximate or fix constant)
     // We can assume a reasonable page size or update app with rect size
-    let page_size = 20; 
+    let page_size = 20;
 
     match key.code {
         KeyCode::PageUp => {
@@ -263,13 +260,13 @@ fn handle_scroll_keys(key: &KeyEvent, app: &mut App) -> bool {
         KeyCode::Home => {
             let active = app.active_channel.clone();
             app.scroll_to_bottom(active.as_deref());
-             if let Some(ch) = app.active_channel.clone() {
-                 app.scroll_offsets.insert(ch, usize::MAX); // Special case for top?
-                 // Wait, scroll_to_bottom puts offset 0.
-                 // Home should scroll to TOP (oldest).
-                 // Logic in renderer was: scroll_up(usize::MAX)
-                 app.scroll_up(usize::MAX);
-             }
+            if let Some(ch) = app.active_channel.clone() {
+                app.scroll_offsets.insert(ch, usize::MAX); // Special case for top?
+                                                           // Wait, scroll_to_bottom puts offset 0.
+                                                           // Home should scroll to TOP (oldest).
+                                                           // Logic in renderer was: scroll_up(usize::MAX)
+                app.scroll_up(usize::MAX);
+            }
             true
         }
         KeyCode::End => {
@@ -279,9 +276,11 @@ fn handle_scroll_keys(key: &KeyEvent, app: &mut App) -> bool {
         }
         KeyCode::Tab => {
             if !app.line_editor.is_empty() {
-                let channel_names: Vec<String> = app.channels.iter().map(|c| c.name.clone()).collect();
-                let completions = crate::client::completion::complete(app.line_editor.content(), &channel_names);
-                
+                let channel_names: Vec<String> =
+                    app.channels.iter().map(|c| c.name.clone()).collect();
+                let completions =
+                    crate::client::completion::complete(app.line_editor.content(), &channel_names);
+
                 if completions.len() == 1 {
                     app.line_editor.set(&completions[0]);
                     app.completions = None;
@@ -326,7 +325,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
 
     // Load config
     let config = Config::load()?;
-    
+
     // Notification settings
     let notify_bell = config.notifications.bell;
     let notify_title = config.notifications.title_update;
@@ -384,7 +383,12 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
 
     // Send initial resize
     if let Ok(size) = terminal.size() {
-        msg_tx.send(ClientMessage::Resize { cols: size.width, rows: size.height }).await?;
+        msg_tx
+            .send(ClientMessage::Resize {
+                cols: size.width,
+                rows: size.height,
+            })
+            .await?;
     }
 
     loop {
@@ -427,7 +431,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                         if let Some(c) = app.channels.iter_mut().find(|c| c.name == channel) {
                             if is_background {
                                 c.has_new_output = true;
-                                
+
                                 let now = std::time::Instant::now();
                                 let should_notify = last_notification
                                     .get(&channel)
@@ -461,7 +465,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                     ServerMessage::ChannelList { channels: list } => {
                         let active_from_server = list.iter().find(|info| info.is_active).map(|info| info.name.clone());
                         app.subscriptions = list.iter().filter(|info| info.is_subscribed).map(|info| info.name.clone()).collect();
-                        
+
                         app.channels = list.into_iter().map(|info| ChannelInfo {
                             name: info.name,
                             running: info.running,
@@ -525,7 +529,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                     _ => {} // Ignore other server messages
                 }
             },
-            
+
             Some(event) = input_rx.recv() => {
                 match event {
                     Event::Resize(cols, rows) => {
@@ -549,7 +553,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                         if app.line_editor.is_empty() && handle_scroll_keys(&key, &mut app) {
                             continue;
                         }
-                        
+
                         let channel_key = app.active_channel.clone().unwrap_or_default();
 
                         match key.code {
@@ -641,7 +645,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                 if !input_content.is_empty() {
                                     history.entry(channel_key.clone()).or_insert_with(|| CommandHistory::new(1000)).add(&input_content);
                                 }
-                                
+
                                 match parse_input(&input_content) {
                                     Ok(ParsedInput::Text(text)) => {
                                         let mut data = text.into_bytes();
@@ -678,14 +682,14 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                     _ => {} // Ignore other events
                 }
             },
-            
+
             Some(msg) = msg_rx.recv() => {
                  let bytes = crate::protocol::serialize(&msg)?;
                  if write_message(&mut writer, &bytes).await.is_err() {
                      break;
                  }
             }
-            
+
             else => break, // All channels closed
         }
 
@@ -695,8 +699,12 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     }
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, event::DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        event::DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
-    
+
     Ok(())
 }

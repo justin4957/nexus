@@ -1,4 +1,4 @@
-//! Command handling for client control commands (prefixed with `:`) 
+//! Command handling for client control commands (prefixed with `:`)
 
 use crate::client::app::{App, ViewMode};
 use crate::protocol::ClientMessage;
@@ -22,7 +22,10 @@ pub async fn handle_control_command(
     match command {
         "new" => {
             if args.is_empty() {
-                app.add_output("SYSTEM".to_string(), "Usage: :new <name> [command]".to_string());
+                app.add_output(
+                    "SYSTEM".to_string(),
+                    "Usage: :new <name> [command]".to_string(),
+                );
                 return Ok(CommandResult::Continue);
             }
             let name = args[0].clone();
@@ -61,15 +64,21 @@ pub async fn handle_control_command(
         }
         "sub" | "subscribe" => {
             if args.is_empty() {
-                app.add_output("SYSTEM".to_string(), "Usage: :sub <channel1> [channel2...] or :sub * for all".to_string());
-                app.add_output("SYSTEM".to_string(), format!(
-                    "Current subscriptions: {}",
-                    if app.subscriptions.is_empty() {
-                        "none".to_string()
-                    } else {
-                        app.subscriptions.join(", ")
-                    }
-                ));
+                app.add_output(
+                    "SYSTEM".to_string(),
+                    "Usage: :sub <channel1> [channel2...] or :sub * for all".to_string(),
+                );
+                app.add_output(
+                    "SYSTEM".to_string(),
+                    format!(
+                        "Current subscriptions: {}",
+                        if app.subscriptions.is_empty() {
+                            "none".to_string()
+                        } else {
+                            app.subscriptions.join(", ")
+                        }
+                    ),
+                );
             } else {
                 msg_tx
                     .send(ClientMessage::Subscribe { channels: args })
@@ -78,15 +87,21 @@ pub async fn handle_control_command(
         }
         "unsub" | "unsubscribe" => {
             if args.is_empty() {
-                app.add_output("SYSTEM".to_string(), "Usage: :unsub <channel1> [channel2...]".to_string());
-                app.add_output("SYSTEM".to_string(), format!(
-                    "Current subscriptions: {}",
-                    if app.subscriptions.is_empty() {
-                        "none".to_string()
-                    } else {
-                        app.subscriptions.join(", ")
-                    }
-                ));
+                app.add_output(
+                    "SYSTEM".to_string(),
+                    "Usage: :unsub <channel1> [channel2...]".to_string(),
+                );
+                app.add_output(
+                    "SYSTEM".to_string(),
+                    format!(
+                        "Current subscriptions: {}",
+                        if app.subscriptions.is_empty() {
+                            "none".to_string()
+                        } else {
+                            app.subscriptions.join(", ")
+                        }
+                    ),
+                );
             } else {
                 msg_tx
                     .send(ClientMessage::Unsubscribe { channels: args })
@@ -94,14 +109,17 @@ pub async fn handle_control_command(
             }
         }
         "subs" | "subscriptions" => {
-            app.add_output("SYSTEM".to_string(), format!(
-                "Current subscriptions: {}",
-                if app.subscriptions.is_empty() {
-                    "none".to_string()
-                } else {
-                    app.subscriptions.join(", ")
-                }
-            ));
+            app.add_output(
+                "SYSTEM".to_string(),
+                format!(
+                    "Current subscriptions: {}",
+                    if app.subscriptions.is_empty() {
+                        "none".to_string()
+                    } else {
+                        app.subscriptions.join(", ")
+                    }
+                ),
+            );
         }
         "clear" => {
             // Clear buffers
@@ -126,7 +144,10 @@ pub async fn handle_control_command(
                     "channel" | "active" => app.view_mode = ViewMode::ActiveChannel,
                     "all" | "interleaved" => app.view_mode = ViewMode::AllChannels,
                     _ => {
-                        app.add_output("SYSTEM".to_string(), "Usage: :view [channel|all]".to_string());
+                        app.add_output(
+                            "SYSTEM".to_string(),
+                            "Usage: :view [channel|all]".to_string(),
+                        );
                         return Ok(CommandResult::Continue);
                     }
                 }
@@ -186,14 +207,17 @@ pub async fn handle_control_command(
                 "  Click channel       Switch to clicked channel in status bar",
                 "  Scroll wheel        Scroll output up/down",
             ];
-            
+
             for line in help_lines {
                 app.add_output("SYSTEM".to_string(), line.to_string());
             }
         }
         "quit" | "exit" => return Ok(CommandResult::Exit),
         _ => {
-            app.add_output("SYSTEM".to_string(), format!("Unknown command: {}", command));
+            app.add_output(
+                "SYSTEM".to_string(),
+                format!("Unknown command: {}", command),
+            );
         }
     }
 
