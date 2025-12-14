@@ -431,7 +431,11 @@ impl Renderer {
 
     /// Display completions directly on the line above the prompt
     /// This bypasses the buffer system so completions are always visible
-    pub fn show_completions(&self, stdout: &mut impl Write, completions: &[String]) -> io::Result<()> {
+    pub fn show_completions(
+        &self,
+        stdout: &mut impl Write,
+        completions: &[String],
+    ) -> io::Result<()> {
         // Use the line just above the prompt
         let completion_row = self.prompt_row().saturating_sub(1);
 
