@@ -956,18 +956,10 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                         }
                                         // Show completions if we couldn't extend
                                         if !extended {
-                                            let completion_list = completions.join("  ");
-                                            renderer.draw_output_line(
+                                            // Show completions directly on line above prompt
+                                            renderer.show_completions(
                                                 &mut std::io::stdout(),
-                                                "SYSTEM",
-                                                &format!("Completions: {}", completion_list),
-                                                active_channel.as_deref(),
-                                            )?;
-                                            // Redraw status bar after showing completions
-                                            renderer.draw_status_bar(
-                                                &mut std::io::stdout(),
-                                                &channels,
-                                                active_channel.as_deref(),
+                                                &completions,
                                             )?;
                                             // Redraw prompt to restore cursor position
                                             renderer.draw_prompt(

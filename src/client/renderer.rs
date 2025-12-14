@@ -429,6 +429,24 @@ impl Renderer {
         stdout.flush()
     }
 
+    /// Display completions directly on the line above the prompt
+    /// This bypasses the buffer system so completions are always visible
+    pub fn show_completions(&self, stdout: &mut impl Write, completions: &[String]) -> io::Result<()> {
+        // Use the line just above the prompt
+        let completion_row = self.prompt_row().saturating_sub(1);
+
+        queue!(stdout, cursor::MoveTo(0, completion_row))?;
+        queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+
+        queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+        queue!(stdout, Print("Completions: "))?;
+        queue!(stdout, SetForegroundColor(Color::Yellow))?;
+        queue!(stdout, Print(completions.join("  ")))?;
+        queue!(stdout, ResetColor)?;
+
+        stdout.flush()
+    }
+
     /// Remove the cached color for a channel so the slot can be reused.
     pub fn clear_channel_color(&mut self, channel_name: &str) {
         self.channel_colors.remove(channel_name);
