@@ -8,6 +8,7 @@ pub struct ChannelInfo {
     pub running: bool,
     pub has_new_output: bool,
     pub exit_code: Option<i32>,
+    pub is_subscribed: bool,
 }
 
 impl ChannelInfo {
@@ -195,6 +196,22 @@ impl LineEditor {
     }
 }
 
+pub struct Notification {
+    pub message: String,
+    pub timestamp: std::time::Instant,
+    pub duration: std::time::Duration,
+}
+
+impl Notification {
+    pub fn new(message: String, duration: std::time::Duration) -> Self {
+        Self {
+            message,
+            timestamp: std::time::Instant::now(),
+            duration,
+        }
+    }
+}
+
 pub struct App {
     pub channels: Vec<ChannelInfo>,
     pub active_channel: Option<String>,
@@ -210,6 +227,15 @@ pub struct App {
     pub max_buffer_lines: usize,
     pub channel_colors: HashMap<String, Color>,
     pub completions: Option<Vec<String>>,
+    pub notifications: Vec<Notification>,
+    pub show_help: bool,
+    pub help_scroll: usize,
+    pub interleaved_scroll: usize,
+    pub last_switched_channel_time: Option<std::time::Instant>,
+    pub status_bar_channel_rects: HashMap<String, Rect>,
+    pub command_palette_active: bool,
+    pub command_palette_input: String,
+    pub command_palette_suggestions: Vec<String>,
 }
 
 impl App {
@@ -229,7 +255,20 @@ impl App {
             max_buffer_lines: 10000,
             channel_colors: HashMap::new(),
             completions: None,
+            notifications: Vec::new(),
+            show_help: false,
+            help_scroll: 0,
+            interleaved_scroll: 0,
+            last_switched_channel_time: None,
+            status_bar_channel_rects: HashMap::new(),
+            command_palette_active: false,
+            command_palette_input: String::new(),
+            command_palette_suggestions: Vec::new(),
         }
+    }
+
+    pub fn add_notification(&mut self, message: String, duration: std::time::Duration) {
+        self.notifications.push(Notification::new(message, duration));
     }
 
     pub fn add_output(&mut self, channel: String, text: String) {
@@ -289,6 +328,14 @@ impl App {
             let offset = self.scroll_offsets.entry(ch.to_string()).or_insert(0);
             *offset = offset.saturating_sub(lines);
         }
+    }
+
+    pub fn scroll_interleaved_up(&mut self, lines: usize) {
+        self.interleaved_scroll = self.interleaved_scroll.saturating_add(lines);
+    }
+
+    pub fn scroll_interleaved_down(&mut self, lines: usize) {
+        self.interleaved_scroll = self.interleaved_scroll.saturating_sub(lines);
     }
 
     pub fn scroll_to_bottom(&mut self, channel: Option<&str>) {
