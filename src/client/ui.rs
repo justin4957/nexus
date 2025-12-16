@@ -108,7 +108,7 @@ fn draw_help_popup(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    let size = f.size();
+    let size = f.area();
     let width = size.width.saturating_sub(10).min(100);
     let height = size.height.saturating_sub(10).min(HELP_TEXT.len() as u16 + 2);
     let area = Rect::new(
@@ -123,9 +123,9 @@ fn draw_help_popup(f: &mut Frame, app: &mut App) {
         .borders(ratatui::widgets::Borders::ALL)
         .border_style(Style::default().fg(Color::Blue))
         .style(Style::default().bg(Color::Black));
-    f.render_widget(block, area);
 
     let inner_area = block.inner(area);
+    f.render_widget(block, area);
     let lines: Vec<ListItem> = HELP_TEXT
         .iter()
         .skip(app.help_scroll)
@@ -185,14 +185,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_help_popup(f, app);
 }
 
-fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
+fn draw_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(ratatui::widgets::Borders::TOP | ratatui::widgets::Borders::LEFT | ratatui::widgets::Borders::RIGHT)
         .title("Channels")
         .border_style(Style::default().fg(Color::DarkGray));
-    f.render_widget(block, area);
 
     let inner_area = block.inner(area); // Get area inside borders
+    f.render_widget(block, area);
     let mut spans = Vec::new();
 
     // Clear previous channel rects
@@ -264,9 +264,9 @@ fn draw_output(f: &mut Frame, app: &mut App, area: Rect) {
         .borders(ratatui::widgets::Borders::ALL)
         .title("Output")
         .border_style(Style::default().fg(Color::DarkGray));
-    f.render_widget(block, area);
 
     let inner_area = block.inner(area);
+    f.render_widget(block, area);
     let mut list_items: Vec<ListItem> = Vec::new();
             let height = inner_area.height as usize;
     
@@ -338,14 +338,29 @@ fn draw_output(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 f.render_widget(List::new(list_items), inner_area); // Use inner_area here
             }
-        }
-    
-    fn draw_input(f: &mut Frame, app: &App, area: Rect) {
+}
+
+fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         let block = Block::default()
             .borders(ratatui::widgets::Borders::TOP | ratatui::widgets::Borders::LEFT | ratatui::widgets::Borders::RIGHT)
             .title("Input")
             .border_style(Style::default().fg(Color::DarkGray));
-        f.render_widget(block, area);
-    
+
         let inner_area = block.inner(area);
+        f.render_widget(block, area);
         let channel_name = app.active_channel.as_deref().unwrap_or("none");
+
+        let prompt_text = format!("#{} ❯ {}", channel_name, app.line_editor.content());
+        let cursor_pos = 1 + channel_name.len() + 3 + app.line_editor.cursor_position(); // # + name + " ❯ " + position
+
+        let paragraph = Paragraph::new(prompt_text)
+            .style(Style::default().fg(Color::White));
+        f.render_widget(paragraph, inner_area);
+
+        // Set cursor position
+        if let Some(row) = inner_area.y.checked_add(0) {
+            if let Some(col) = inner_area.x.checked_add(cursor_pos as u16) {
+                f.set_cursor_position(Position::new(col, row));
+            }
+        }
+}

@@ -18,7 +18,6 @@ pub const COMMANDS: &[&str] = &[
 ];
 
 use crate::client::app::App;
-use crate::client::app::ChannelInfo;
 
 /// Complete a partial input string
 /// Returns a list of possible completions
@@ -35,13 +34,13 @@ pub fn complete(input: &str, app: &App) -> Vec<String> {
 
             // Commands that take channel names as arguments
             if matches!(cmd, "kill" | "sub" | "unsub") {
-                return complete_channel_arg(input, arg_partial, &app);
+                return complete_channel_arg(input, arg_partial, app);
             }
             return vec![];
         }
 
         // Completing the command name itself
-        return complete_command(partial_cmd, &app);
+        return complete_command(partial_cmd, app);
     }
 
     // Channel completion: #channel
@@ -62,7 +61,7 @@ fn complete_command(partial: &str, app: &App) -> Vec<String> {
             // Context-aware filtering:
             // Only suggest 'kill' for running channels
             // Only suggest 'sub'/'unsub' for relevant channels
-            match *cmd {
+            match **cmd {
                 "kill" => app.channels.iter().any(|ch| ch.running && app.active_channel.as_deref() != Some(&ch.name)),
                 "sub" => app.channels.iter().any(|ch| !ch.is_subscribed),
                 "unsub" => app.channels.iter().any(|ch| ch.is_subscribed),

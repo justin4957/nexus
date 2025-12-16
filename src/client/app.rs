@@ -1,4 +1,5 @@
 use chrono::{DateTime, Local};
+use ratatui::prelude::Rect;
 use ratatui::style::Color;
 use std::collections::{HashMap, HashSet};
 // actually we should define it here or in a types module. Let's redefine it here and update mod.rs to use this one.

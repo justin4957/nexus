@@ -16,7 +16,7 @@ use anyhow::{anyhow, Context, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{enable_raw_mode, EnterAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::collections::HashMap;
@@ -309,7 +309,7 @@ fn handle_scroll_keys(key: &KeyEvent, app: &mut App) -> bool {
             KeyCode::Tab => {
                 if !app.line_editor.is_empty() {
                     let completions =
-                        crate::client::completion::complete(app.line_editor.content(), &app);
+                        crate::client::completion::complete(app.line_editor.content(), app);
 
                     if completions.len() == 1 {
                         app.line_editor.set(&completions[0]);
@@ -366,7 +366,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     // Channels
     let (input_tx, mut input_rx) = mpsc::channel(100);
     let (server_tx, mut server_rx) = mpsc::channel(100);
-    let (msg_tx, mut msg_rx) = mpsc::channel(100);
+    let (msg_tx, _msg_rx) = mpsc::channel(100);
 
     // Input thread
     std::thread::spawn(move || loop {
@@ -423,6 +423,11 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     }
 
     loop {
+        // Check for exit condition
+        if should_exit {
+            break;
+        }
+
         // Filter out expired notifications
         let now = std::time::Instant::now();
         app.notifications.retain(|n| now.duration_since(n.timestamp) < n.duration);
@@ -529,6 +534,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                     running: true,
                                     has_new_output: false,
                                     exit_code: None,
+                                    is_subscribed: false,
                                 });
                                 if app.active_channel.is_none() {
                                     app.active_channel = Some(name.clone()); // Clone to use here
@@ -792,6 +798,8 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                     _ => {} // Ignore other events
                 }
             },
+        }
+    }
 
     Ok(())
 }
