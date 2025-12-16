@@ -244,65 +244,96 @@ pub async fn attach_or_create(name: &str) -> Result<()> {
 
 /// Handle scroll keys when input buffer is empty
 fn handle_scroll_keys(key: &KeyEvent, app: &mut App) -> bool {
-    // Determine visible rows (approximate or fix constant)
-    // We can assume a reasonable page size or update app with rect size
     let page_size = 20;
 
-    match key.code {
-        KeyCode::PageUp => {
-            app.scroll_up(page_size);
-            true
-        }
-        KeyCode::PageDown => {
-            app.scroll_down(page_size);
-            true
-        }
-        KeyCode::Home => {
-            let active = app.active_channel.clone();
-            app.scroll_to_bottom(active.as_deref());
-            if let Some(ch) = app.active_channel.clone() {
-                app.scroll_offsets.insert(ch, usize::MAX); // Special case for top?
-                                                           // Wait, scroll_to_bottom puts offset 0.
-                                                           // Home should scroll to TOP (oldest).
-                                                           // Logic in renderer was: scroll_up(usize::MAX)
-                app.scroll_up(usize::MAX);
+    if app.show_help { // If help is open, scroll help text
+        match key.code {
+            KeyCode::PageUp => {
+                app.help_scroll = app.help_scroll.saturating_sub(page_size);
+                true
             }
-            true
+            KeyCode::PageDown => {
+                app.help_scroll = app.help_scroll.saturating_add(page_size);
+                true
+            }
+            KeyCode::Home => {
+                app.help_scroll = 0;
+                true
+            }
+            KeyCode::End => {
+                app.help_scroll = usize::MAX; // Will be clamped by UI
+                true
+            }
+            _ => false,
         }
-        KeyCode::End => {
-            let active = app.active_channel.clone();
-            app.scroll_to_bottom(active.as_deref());
-            true
-        }
-        KeyCode::Tab => {
-            if !app.line_editor.is_empty() {
-                let channel_names: Vec<String> =
-                    app.channels.iter().map(|c| c.name.clone()).collect();
-                let completions =
-                    crate::client::completion::complete(app.line_editor.content(), &channel_names);
-
-                if completions.len() == 1 {
-                    app.line_editor.set(&completions[0]);
-                    app.completions = None;
-                } else if !completions.is_empty() {
-                    if let Some(prefix) = crate::client::completion::common_prefix(&completions) {
-                        if prefix.len() > app.line_editor.content().len() {
-                            app.line_editor.set(&prefix);
-                        }
-                    }
-                    app.completions = Some(completions);
+    } else { // Normal scrolling
+        match key.code {
+            KeyCode::PageUp => {
+                if app.view_mode == ViewMode::AllChannels {
+                    app.scroll_interleaved_up(page_size);
                 } else {
-                    app.completions = None;
+                    app.scroll_up(page_size);
                 }
-            } else {
-                app.view_mode = match app.view_mode {
-                    ViewMode::ActiveChannel => ViewMode::AllChannels,
-                    ViewMode::AllChannels => ViewMode::ActiveChannel,
-                };
+                true
             }
-            true
+            KeyCode::PageDown => {
+                if app.view_mode == ViewMode::AllChannels {
+                    app.scroll_interleaved_down(page_size);
+                } else {
+                    app.scroll_down(page_size);
+                }
+                true
+            }
+            KeyCode::Home => {
+                if app.view_mode == ViewMode::AllChannels {
+                    app.interleaved_scroll = usize::MAX; // Will be clamped by UI
+                } else {
+                    let active = app.active_channel.clone();
+                    app.scroll_to_bottom(active.as_deref());
+                    if let Some(ch) = app.active_channel.clone() {
+                        app.scroll_offsets.insert(ch, usize::MAX);
+                        app.scroll_up(usize::MAX);
+                    }
+                }
+                true
+            }
+            KeyCode::End => {
+                if app.view_mode == ViewMode::AllChannels {
+                    app.interleaved_scroll = 0;
+                } else {
+                    let active = app.active_channel.clone();
+                    app.scroll_to_bottom(active.as_deref());
+                }
+                true
+            }
+            KeyCode::Tab => {
+                if !app.line_editor.is_empty() {
+                    let completions =
+                        crate::client::completion::complete(app.line_editor.content(), app);
+
+                    if completions.len() == 1 {
+                        app.line_editor.set(&completions[0]);
+                        app.completions = None;
+                    } else if !completions.is_empty() {
+                        if let Some(prefix) = crate::client::completion::common_prefix(&completions) {
+                            if prefix.len() > app.line_editor.content().len() {
+                                app.line_editor.set(&prefix);
+                            }
+                        }
+                        app.completions = Some(completions);
+                    } else {
+                        app.completions = None;
+                    }
+                } else {
+                    app.view_mode = match app.view_mode {
+                        ViewMode::ActiveChannel => ViewMode::AllChannels,
+                        ViewMode::AllChannels => ViewMode::ActiveChannel,
+                    };
+                }
+                true
+            }
+            _ => false,
         }
-        _ => false,
     }
 }
 
@@ -335,7 +366,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     // Channels
     let (input_tx, mut input_rx) = mpsc::channel(100);
     let (server_tx, mut server_rx) = mpsc::channel(100);
-    let (msg_tx, mut msg_rx) = mpsc::channel(100);
+    let (msg_tx, _msg_rx) = mpsc::channel(100);
 
     // Input thread
     std::thread::spawn(move || loop {
@@ -392,6 +423,15 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
     }
 
     loop {
+        // Check for exit condition
+        if should_exit {
+            break;
+        }
+
+        // Filter out expired notifications
+        let now = std::time::Instant::now();
+        app.notifications.retain(|n| now.duration_since(n.timestamp) < n.duration);
+
         // Draw UI
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
@@ -412,9 +452,10 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                     ServerMessage::Status { channels: status } => {
                         if status.is_empty() {
                             app.add_output("SYSTEM".to_string(), "No status available.".to_string());
+                            app.add_notification("No status available.".to_string(), Duration::from_secs(3));
                         } else {
                             for s in status {
-                                app.add_output("SYSTEM".to_string(), format!(
+                                let msg_str = format!(
                                     "#{} {} pid={:?} exit={:?} cwd={} cmd={}",
                                     s.name,
                                     if s.running { "running" } else { "stopped" },
@@ -422,7 +463,9 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                     s.exit_code,
                                     s.working_dir,
                                     s.command
-                                ));
+                                );
+                                app.add_output("SYSTEM".to_string(), msg_str.clone());
+                                app.add_notification(msg_str, Duration::from_secs(5));
                             }
                         }
                     },
@@ -444,6 +487,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                         // Bell
                                         print!("\x07");
                                     }
+                                    app.add_notification(format!("New output in #{}", channel), Duration::from_secs(3));
                                 }
                             }
                         }
@@ -471,6 +515,7 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                             running: info.running,
                             has_new_output: false,
                             exit_code: None,
+                            is_subscribed: info.is_subscribed,
                         }).collect();
 
                         if let Some(active) = active_from_server {
@@ -489,22 +534,26 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                     running: true,
                                     has_new_output: false,
                                     exit_code: None,
+                                    is_subscribed: false,
                                 });
                                 if app.active_channel.is_none() {
-                                    app.active_channel = Some(name);
+                                    app.active_channel = Some(name.clone()); // Clone to use here
                                 }
+                                app.add_notification(format!("Channel #{} created.", name), Duration::from_secs(3));
                             }
                             ChannelEvent::Exited { name, exit_code } => {
                                 if let Some(c) = app.channels.iter_mut().find(|c| c.name == name) {
                                     c.running = false;
                                     c.exit_code = exit_code;
                                 }
+                                app.add_notification(format!("Channel #{} exited with code {:?}", name, exit_code), Duration::from_secs(3));
                             }
                             ChannelEvent::Killed { name } => {
                                 if let Some(c) = app.channels.iter_mut().find(|c| c.name == name) {
                                     c.running = false;
                                     c.exit_code = None;
                                 }
+                                app.add_notification(format!("Channel #{} killed.", name), Duration::from_secs(3));
                             }
                             ChannelEvent::ActiveChanged { name } => {
                                 app.active_channel = Some(name.clone());
@@ -513,18 +562,23 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                                 }
                                 let ch_name = Some(name.clone());
                                 app.scroll_to_bottom(ch_name.as_deref());
+                                app.add_notification(format!("Switched to #{}", name), Duration::from_secs(2));
+                                app.last_switched_channel_time = Some(std::time::Instant::now());
                             }
                             ChannelEvent::SubscriptionChanged { subscribed } => {
                                 app.subscriptions = subscribed;
-                                app.add_output("SYSTEM".to_string(), format!(
+                                let msg_str = format!(
                                     "Subscriptions updated: {}",
                                     if app.subscriptions.is_empty() { "none".to_string() } else { app.subscriptions.join(", ") }
-                                ));
+                                );
+                                app.add_output("SYSTEM".to_string(), msg_str.clone());
+                                app.add_notification(msg_str, Duration::from_secs(3));
                             }
                         }
                     },
                     ServerMessage::Error { message } => {
                         app.add_output("SYSTEM".to_string(), format!("Error: {}", message));
+                        app.add_notification(format!("Error: {}", message), Duration::from_secs(5));
                     },
                     _ => {} // Ignore other server messages
                 }
@@ -550,154 +604,204 @@ async fn run_client_loop(stream: UnixStream) -> Result<()> {
                         }
                     },
                     Event::Key(key) => {
-                        if app.line_editor.is_empty() && handle_scroll_keys(&key, &mut app) {
-                            continue;
-                        }
+                        if app.command_palette_active {
+                            match key.code {
+                                KeyCode::Char(c) => {
+                                    app.command_palette_input.push(c);
+                                    let all_commands = vec![
+                                        "new", "kill", "list", "status", "sub", "unsub",
+                                        "subs", "clear", "view", "timestamps", "help", "quit"
+                                    ].into_iter().map(|s| s.to_string()).collect::<Vec<String>>();
+                                    app.command_palette_suggestions = all_commands.into_iter()
+                                        .filter(|cmd| cmd.starts_with(&app.command_palette_input))
+                                        .collect();
+                                }
+                                KeyCode::Backspace => {
+                                    app.command_palette_input.pop();
+                                    let all_commands = vec![
+                                        "new", "kill", "list", "status", "sub", "unsub",
+                                        "subs", "clear", "view", "timestamps", "help", "quit"
+                                    ].into_iter().map(|s| s.to_string()).collect::<Vec<String>>();
+                                    app.command_palette_suggestions = all_commands.into_iter()
+                                        .filter(|cmd| cmd.starts_with(&app.command_palette_input))
+                                        .collect();
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(command) = app.command_palette_suggestions.first().cloned() {
+                                        let parsed_input = parse_input(&format!(":{}", command));
+                                        if let Ok(ParsedInput::ControlCommand { command, args }) = parsed_input {
+                                            match handle_control_command(
+                                                &command, args, &mut app, &msg_tx, &format!(":{}", command)
+                                            ).await? {
+                                                CommandResult::Exit => should_exit = true,
+                                                CommandResult::Continue => {}
+                                            }
+                                        }
+                                    }
+                                    app.command_palette_active = false;
+                                    app.command_palette_input.clear();
+                                    app.command_palette_suggestions.clear();
+                                }
+                                KeyCode::Esc => {
+                                    app.command_palette_active = false;
+                                    app.command_palette_input.clear();
+                                    app.command_palette_suggestions.clear();
+                                }
+                                _ => {}
+                            }
+                        } else if app.show_help { // If help is open, handle its input
+                            match key.code {
+                                KeyCode::PageUp => { app.help_scroll = app.help_scroll.saturating_sub(1); }
+                                KeyCode::PageDown => { app.help_scroll = app.help_scroll.saturating_add(1); }
+                                KeyCode::Esc | KeyCode::Char('?') => { app.show_help = false; }
+                                _ => {}
+                            }
+                        } else { // Normal input handling
+                            if app.line_editor.is_empty() && handle_scroll_keys(&key, &mut app) {
+                                continue;
+                            }
 
-                        let channel_key = app.active_channel.clone().unwrap_or_default();
+                            let channel_key = app.active_channel.clone().unwrap_or_default();
 
-                        match key.code {
-                            KeyCode::Char(c) => {
-                                app.completions = None;
-                                if key.modifiers.contains(KeyModifiers::ALT) {
-                                    if let Some(digit) = c.to_digit(10) {
-                                        if (1..=9).contains(&digit) {
-                                            let idx = (digit - 1) as usize;
+                            match key.code {
+                                KeyCode::Char(c) => {
+                                    app.completions = None;
+                                    if key.modifiers.contains(KeyModifiers::ALT) {
+                                        if (1..=9).contains(&c.to_digit(10).unwrap_or(0)) {
+                                            let idx = (c.to_digit(10).unwrap_or(0) - 1) as usize;
                                             if let Some(channel) = app.channels.get(idx) {
                                                 msg_tx.send(ClientMessage::SwitchChannel { name: channel.name.clone() }).await?;
+                                                app.last_switched_channel_time = Some(std::time::Instant::now());
                                             }
                                         }
-                                    }
-                                } else if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    match c {
-                                        'c' => {
-                                            if app.line_editor.is_empty() {
-                                                msg_tx.send(ClientMessage::Input { data: vec![3] }).await?;
-                                            } else {
-                                                app.line_editor.clear();
-                                                if let Some(h) = history.get_mut(&channel_key) { h.reset_position(); }
+                                    } else if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                        match c {
+                                            'p' => { // Ctrl+P to toggle command palette
+                                                app.command_palette_active = !app.command_palette_active;
+                                                if app.command_palette_active {
+                                                    app.command_palette_input.clear();
+                                                    app.command_palette_suggestions = crate::client::completion::complete("", &app);
+                                                }
                                             }
+                                            'c' => {
+                                                if app.line_editor.is_empty() {
+                                                    msg_tx.send(ClientMessage::Input { data: vec![3] }).await?;
+                                                } else {
+                                                    app.line_editor.clear();
+                                                    if let Some(h) = history.get_mut(&channel_key) { h.reset_position(); }
+                                                }
+                                            }
+                                            '\\' => should_exit = true,
+                                            'd' => {
+                                                if app.line_editor.is_empty() {
+                                                     msg_tx.send(ClientMessage::Input { data: vec![4] }).await?;
+                                                }
+                                            },
+                                            'a' => { app.line_editor.move_home(); },
+                                            'e' => { app.line_editor.move_end(); },
+                                            'w' => { app.line_editor.delete_word_backward(); },
+                                            'k' => { app.line_editor.delete_to_end(); },
+                                            'u' => {
+                                                 if app.line_editor.is_empty() {
+                                                     app.scroll_up(10);
+                                                 } else {
+                                                     app.line_editor.delete_to_start();
+                                                 }
+                                            },
+                                            'b' => { app.scroll_down(10); },
+                                            _ => {} // Ignore other control chars
                                         }
-                                        '\\' => should_exit = true,
-                                        'd' => {
-                                            if app.line_editor.is_empty() {
-                                                 msg_tx.send(ClientMessage::Input { data: vec![4] }).await?;
-                                            }
-                                        },
-                                        'a' => { app.line_editor.move_home(); },
-                                        'e' => { app.line_editor.move_end(); },
-                                        'w' => { app.line_editor.delete_word_backward(); },
-                                        'k' => { app.line_editor.delete_to_end(); },
-                                        'u' => {
-                                             if app.line_editor.is_empty() {
-                                                 app.scroll_up(10);
-                                             } else {
-                                                 app.line_editor.delete_to_start();
-                                             }
-                                        },
-                                        'b' => { app.scroll_down(10); },
-                                        _ => {} // Ignore other control chars
+                                    } else {
+                                        app.line_editor.insert(c);
+                                        let active = app.active_channel.clone();
+                                        app.scroll_to_bottom(active.as_deref());
+                                        if let Some(h) = history.get_mut(&channel_key) { h.reset_position(); }
                                     }
-                                } else {
-                                    app.line_editor.insert(c);
-                                    let active = app.active_channel.clone();
-                                    app.scroll_to_bottom(active.as_deref());
-                                    if let Some(h) = history.get_mut(&channel_key) { h.reset_position(); }
                                 }
-                            }
-                            KeyCode::Backspace => { app.line_editor.backspace(); },
-                            KeyCode::Delete => { app.line_editor.delete(); },
-                            KeyCode::Left => {
-                                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    // Switch channel
-                                    app.prev_channel();
-                                    if let Some(ch) = &app.active_channel {
-                                        msg_tx.send(ClientMessage::SwitchChannel { name: ch.clone() }).await?;
+                                KeyCode::Backspace => { app.line_editor.backspace(); },
+                                KeyCode::Delete => { app.line_editor.delete(); },
+                                KeyCode::Left => {
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                        // Switch channel
+                                        app.prev_channel();
+                                        if let Some(ch) = &app.active_channel {
+                                            msg_tx.send(ClientMessage::SwitchChannel { name: ch.clone() }).await?;
+                                            app.last_switched_channel_time = Some(std::time::Instant::now());
+                                        }
+                                    } else {
+                                        app.line_editor.move_left();
                                     }
-                                } else {
-                                    app.line_editor.move_left();
-                                }
-                            },
-                            KeyCode::Right => {
-                                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    app.next_channel();
-                                     if let Some(ch) = &app.active_channel {
-                                        msg_tx.send(ClientMessage::SwitchChannel { name: ch.clone() }).await?;
+                                },
+                                KeyCode::Right => {
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                        app.next_channel();
+                                         if let Some(ch) = &app.active_channel {
+                                            msg_tx.send(ClientMessage::SwitchChannel { name: ch.clone() }).await?;
+                                            app.last_switched_channel_time = Some(std::time::Instant::now());
+                                        }
+                                    } else {
+                                        app.line_editor.move_right();
                                     }
-                                } else {
-                                    app.line_editor.move_right();
-                                }
-                            },
-                            KeyCode::Up => {
-                                let h = history.entry(channel_key.clone()).or_insert_with(|| CommandHistory::new(1000));
-                                if let Some(cmd) = h.up(app.line_editor.content()) {
-                                    app.line_editor.set(cmd);
-                                }
-                            },
-                            KeyCode::Down => {
-                                let h = history.entry(channel_key.clone()).or_insert_with(|| CommandHistory::new(1000));
-                                if let Some(cmd) = h.down() {
-                                    app.line_editor.set(cmd);
-                                }
-                            },
-                            KeyCode::Enter => {
-                                let input_content = app.line_editor.take();
-                                if !input_content.is_empty() {
-                                    history.entry(channel_key.clone()).or_insert_with(|| CommandHistory::new(1000)).add(&input_content);
-                                }
+                                },
+                                KeyCode::Up => {
+                                    let h = history.entry(channel_key.clone()).or_insert_with(|| CommandHistory::new(1000));
+                                    if let Some(cmd) = h.up(app.line_editor.content()) {
+                                        app.line_editor.set(cmd);
+                                    }
+                                },
+                                KeyCode::Down => {
+                                    let h = history.entry(channel_key.clone()).or_insert_with(|| CommandHistory::new(1000));
+                                    if let Some(cmd) = h.down() {
+                                        app.line_editor.set(cmd);
+                                    }
+                                },
+                                KeyCode::Enter => {
+                                    let input_content = app.line_editor.take();
+                                    if !input_content.is_empty() {
+                                        history.entry(channel_key.clone()).or_insert_with(|| CommandHistory::new(1000)).add(&input_content);
+                                    }
 
-                                match parse_input(&input_content) {
-                                    Ok(ParsedInput::Text(text)) => {
-                                        let mut data = text.into_bytes();
-                                        data.push(b'\n');
-                                        msg_tx.send(ClientMessage::Input { data }).await?;
-                                    }
-                                    Ok(ParsedInput::SwitchChannel(name)) => {
-                                        msg_tx.send(ClientMessage::SwitchChannel { name }).await?;
-                                    }
-                                    Ok(ParsedInput::SendToChannel { channel, command }) => {
-                                        msg_tx.send(ClientMessage::InputTo {
-                                            channel,
-                                            data: format!("{}\n", command).into_bytes()
-                                        }).await?;
-                                    }
-                                    Ok(ParsedInput::ControlCommand { command, args }) => {
-                                        match handle_control_command(
-                                            &command,
-                                            args,
-                                            &mut app,
-                                            &msg_tx,
-                                            &input_content
-                                        ).await? {
-                                            CommandResult::Exit => should_exit = true,
-                                            CommandResult::Continue => {} // Do nothing
+                                    match parse_input(&input_content) {
+                                        Ok(ParsedInput::Text(text)) => {
+                                            let mut data = text.into_bytes();
+                                            data.push(b'\n');
+                                            msg_tx.send(ClientMessage::Input { data }).await?;
                                         }
+                                        Ok(ParsedInput::SwitchChannel(name)) => {
+                                            msg_tx.send(ClientMessage::SwitchChannel { name }).await?;
+                                        }
+                                        Ok(ParsedInput::SendToChannel { channel, command }) => {
+                                            msg_tx.send(ClientMessage::InputTo {
+                                                channel,
+                                                data: format!("{}\n", command).into_bytes()
+                                            }).await?;
+                                        }
+                                        Ok(ParsedInput::ControlCommand { command, args }) => {
+                                            match handle_control_command(
+                                                &command,
+                                                args,
+                                                &mut app,
+                                                &msg_tx,
+                                                &input_content
+                                            ).await? {
+                                                CommandResult::Exit => should_exit = true,
+                                                CommandResult::Continue => {} // Do nothing
+                                            }
+                                        }
+                                        Err(_) => {} // Ignore parse errors for now
                                     }
-                                    Err(_) => {} // Ignore parse errors for now
-                                }
-                            },
-                            _ => {} // Ignore other key events
+                                },
+                                _ => {} // Ignore other key events
+                            }
                         }
                     },
                     _ => {} // Ignore other events
                 }
             },
-
-            Some(msg) = msg_rx.recv() => {
-                 let bytes = crate::protocol::serialize(&msg)?;
-                 if write_message(&mut writer, &bytes).await.is_err() {
-                     break;
-                 }
-            }
-
-            else => break, // All channels closed
-        }
-
-        if should_exit {
-            break;
         }
     }
 
+    // Cleanup
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),

@@ -17,10 +17,13 @@ pub const COMMANDS: &[&str] = &[
     "exit",
 ];
 
+use crate::client::app::App;
+
 /// Complete a partial input string
 /// Returns a list of possible completions
-pub fn complete(input: &str, channel_names: &[String]) -> Vec<String> {
+pub fn complete(input: &str, app: &App) -> Vec<String> {
     let input = input.trim();
+    let channel_names: Vec<String> = app.channels.iter().map(|c| c.name.clone()).collect();
 
     // Command completion: :cmd
     if let Some(partial_cmd) = input.strip_prefix(':') {
@@ -31,29 +34,40 @@ pub fn complete(input: &str, channel_names: &[String]) -> Vec<String> {
 
             // Commands that take channel names as arguments
             if matches!(cmd, "kill" | "sub" | "unsub") {
-                return complete_channel_arg(input, arg_partial, channel_names);
+                return complete_channel_arg(input, arg_partial, app);
             }
             return vec![];
         }
 
         // Completing the command name itself
-        return complete_command(partial_cmd);
+        return complete_command(partial_cmd, app);
     }
 
     // Channel completion: #channel
     if let Some(partial_channel) = input.strip_prefix('#') {
-        return complete_channel(partial_channel, channel_names);
+        return complete_channel(partial_channel, &channel_names);
     }
 
     vec![]
 }
 
 /// Complete a command name
-fn complete_command(partial: &str) -> Vec<String> {
+fn complete_command(partial: &str, app: &App) -> Vec<String> {
     let partial_lower = partial.to_lowercase();
     COMMANDS
         .iter()
-        .filter(|cmd| cmd.starts_with(&partial_lower))
+        .filter(|cmd| {
+            cmd.starts_with(&partial_lower) &&
+            // Context-aware filtering:
+            // Only suggest 'kill' for running channels
+            // Only suggest 'sub'/'unsub' for relevant channels
+            match **cmd {
+                "kill" => app.channels.iter().any(|ch| ch.running && app.active_channel.as_deref() != Some(&ch.name)),
+                "sub" => app.channels.iter().any(|ch| !ch.is_subscribed),
+                "unsub" => app.channels.iter().any(|ch| ch.is_subscribed),
+                _ => true, // Other commands always suggested
+            }
+        })
         .map(|cmd| format!(":{}", cmd))
         .collect()
 }
@@ -72,7 +86,7 @@ fn complete_channel(partial: &str, channel_names: &[String]) -> Vec<String> {
 fn complete_channel_arg(
     full_input: &str,
     partial_arg: &str,
-    channel_names: &[String],
+    app: &App,
 ) -> Vec<String> {
     let partial_lower = partial_arg.to_lowercase();
     let prefix = if let Some(space_idx) = full_input.find(' ') {
@@ -81,9 +95,22 @@ fn complete_channel_arg(
         full_input
     };
 
-    channel_names
-        .iter()
-        .filter(|name| name.to_lowercase().starts_with(&partial_lower))
+    let cmd = full_input.strip_prefix(':').and_then(|s| s.split_whitespace().next()).unwrap_or("");
+
+    let filtered_channels: Vec<String> = app.channels.iter()
+        .filter(|ch| {
+            ch.name.to_lowercase().starts_with(&partial_lower) &&
+            match cmd {
+                "kill" => ch.running,
+                "sub" => !ch.is_subscribed,
+                "unsub" => ch.is_subscribed,
+                _ => true,
+            }
+        })
+        .map(|ch| ch.name.clone())
+        .collect();
+
+    filtered_channels.into_iter()
         .map(|name| format!("{}{}", prefix, name))
         .collect()
 }
@@ -119,18 +146,33 @@ pub fn common_prefix(completions: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::app::ChannelInfo;
+
+    fn create_test_app(channel_names: Vec<&str>) -> App {
+        let mut app = App::new();
+        for name in channel_names {
+            app.channels.push(ChannelInfo {
+                name: name.to_string(),
+                running: true,
+                has_new_output: false,
+                exit_code: None,
+                is_subscribed: false,
+            });
+        }
+        app
+    }
 
     #[test]
     fn test_complete_command() {
-        let channels = vec![];
-        let completions = complete(":ne", &channels);
+        let app = create_test_app(vec![]);
+        let completions = complete(":ne", &app);
         assert_eq!(completions, vec![":new"]);
     }
 
     #[test]
     fn test_complete_command_multiple() {
-        let channels = vec![];
-        let completions = complete(":s", &channels);
+        let app = create_test_app(vec!["shell"]);
+        let completions = complete(":s", &app);
         assert!(completions.contains(&":status".to_string()));
         assert!(completions.contains(&":sub".to_string()));
         assert!(completions.contains(&":subs".to_string()));
@@ -138,19 +180,15 @@ mod tests {
 
     #[test]
     fn test_complete_channel() {
-        let channels = vec![
-            "shell".to_string(),
-            "build".to_string(),
-            "server".to_string(),
-        ];
-        let completions = complete("#sh", &channels);
+        let app = create_test_app(vec!["shell", "build", "server"]);
+        let completions = complete("#sh", &app);
         assert_eq!(completions, vec!["#shell"]);
     }
 
     #[test]
     fn test_complete_channel_arg() {
-        let channels = vec!["shell".to_string(), "build".to_string()];
-        let completions = complete(":kill sh", &channels);
+        let app = create_test_app(vec!["shell", "build"]);
+        let completions = complete(":kill sh", &app);
         assert_eq!(completions, vec![":kill shell"]);
     }
 
