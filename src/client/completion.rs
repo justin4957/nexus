@@ -146,18 +146,33 @@ pub fn common_prefix(completions: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::app::ChannelInfo;
+
+    fn create_test_app(channel_names: Vec<&str>) -> App {
+        let mut app = App::new();
+        for name in channel_names {
+            app.channels.push(ChannelInfo {
+                name: name.to_string(),
+                running: true,
+                has_new_output: false,
+                exit_code: None,
+                is_subscribed: false,
+            });
+        }
+        app
+    }
 
     #[test]
     fn test_complete_command() {
-        let channels = vec![];
-        let completions = complete(":ne", &channels);
+        let app = create_test_app(vec![]);
+        let completions = complete(":ne", &app);
         assert_eq!(completions, vec![":new"]);
     }
 
     #[test]
     fn test_complete_command_multiple() {
-        let channels = vec![];
-        let completions = complete(":s", &channels);
+        let app = create_test_app(vec!["shell"]);
+        let completions = complete(":s", &app);
         assert!(completions.contains(&":status".to_string()));
         assert!(completions.contains(&":sub".to_string()));
         assert!(completions.contains(&":subs".to_string()));
@@ -165,19 +180,15 @@ mod tests {
 
     #[test]
     fn test_complete_channel() {
-        let channels = vec![
-            "shell".to_string(),
-            "build".to_string(),
-            "server".to_string(),
-        ];
-        let completions = complete("#sh", &channels);
+        let app = create_test_app(vec!["shell", "build", "server"]);
+        let completions = complete("#sh", &app);
         assert_eq!(completions, vec!["#shell"]);
     }
 
     #[test]
     fn test_complete_channel_arg() {
-        let channels = vec!["shell".to_string(), "build".to_string()];
-        let completions = complete(":kill sh", &channels);
+        let app = create_test_app(vec!["shell", "build"]);
+        let completions = complete(":kill sh", &app);
         assert_eq!(completions, vec![":kill shell"]);
     }
 
